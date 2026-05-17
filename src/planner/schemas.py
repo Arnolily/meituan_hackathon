@@ -1,8 +1,10 @@
 from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from planner.vocab import ALLOWED_CATEGORIES, ALLOWED_GOALS, ALLOWED_POI_TYPES
 
 
 class CitySubsetConfig(BaseModel):
@@ -81,3 +83,125 @@ class CitySubsetAccumulator:
             ),
         )
 
+
+BudgetLevel = Literal["low", "medium", "high", "unknown"]
+IntentParseMethod = Literal["llm"]
+
+
+class Intent(BaseModel):
+    raw_query: str
+    city: Optional[str] = None
+    target_area: Optional[str] = None
+    goals: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    poi_types: list[str] = Field(default_factory=list)
+    budget_level: BudgetLevel = "unknown"
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    return_location: Optional[str] = None
+    hard_constraints: list[str] = Field(default_factory=list)
+    soft_preferences: list[str] = Field(default_factory=list)
+    parse_method: IntentParseMethod = "llm"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("goals")
+    @classmethod
+    def validate_goals(cls, value: list[str]) -> list[str]:
+        invalid = [item for item in value if item not in ALLOWED_GOALS]
+        if invalid:
+            raise ValueError(f"Invalid goals: {invalid}. Allowed goals: {ALLOWED_GOALS}")
+        return value
+
+    @field_validator("categories")
+    @classmethod
+    def validate_categories(cls, value: list[str]) -> list[str]:
+        invalid = [item for item in value if item not in ALLOWED_CATEGORIES]
+        if invalid:
+            raise ValueError(f"Invalid categories: {invalid}. Allowed categories: {ALLOWED_CATEGORIES}")
+        return value
+
+    @field_validator("poi_types")
+    @classmethod
+    def validate_poi_types(cls, value: list[str]) -> list[str]:
+        invalid = [item for item in value if item not in ALLOWED_POI_TYPES]
+        if invalid:
+            raise ValueError(f"Invalid poi_types: {invalid}. Allowed poi_types: {ALLOWED_POI_TYPES}")
+        return value
+
+    @classmethod
+    def from_llm_payload(cls, payload: dict[str, Any], *, raw_query: str) -> "Intent":
+        payload = dict(payload)
+        payload["raw_query"] = raw_query
+        payload["parse_method"] = "llm"
+        return cls.model_validate(payload)
+
+
+class RawPOI(BaseModel):
+    business_id: str
+    name: str
+    address: str = ""
+    city: str
+    state: str
+    postal_code: str = ""
+    latitude: float
+    longitude: float
+    stars: float
+    review_count: int
+    is_open: bool
+    categories: list[str] = Field(default_factory=list)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    hours: dict[str, str] = Field(default_factory=dict)
+    price_tier: Optional[int] = None
+    price_level: Optional[str] = None
+    distance_to_anchor_km: Optional[float] = None
+    estimated_travel_minutes: Optional[float] = None
+    retrieval_score: float = 0.0
+    retrieval_reasons: list[str] = Field(default_factory=list)
+
+
+class ReviewComment(BaseModel):
+    review_id: str
+    business_id: str
+    user_id: str
+    stars: float
+    useful: int = 0
+    funny: int = 0
+    cool: int = 0
+    text: str
+    date: str
+
+
+class TipComment(BaseModel):
+    business_id: str
+    user_id: str
+    text: str
+    date: str
+    compliment_count: int = 0
+
+
+class POICommentBundle(BaseModel):
+    business_id: str
+    name: str
+    city: str
+    review_count_loaded: int = 0
+    tip_count_loaded: int = 0
+    reviews: list[ReviewComment] = Field(default_factory=list)
+    tips: list[TipComment] = Field(default_factory=list)
+
+
+class GeoPoint(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class AnchorPoint(BaseModel):
+    name: str = "anchor"
+    latitude: float
+    longitude: float
+
+
+class SpatialConstraint(BaseModel):
+    anchor: AnchorPoint
+    max_radius_km: Optional[float] = None
+    max_travel_min: Optional[float] = None
+    mode: Literal["walking", "driving", "transit"] = "walking"

@@ -5,5 +5,7 @@ Summary: Data-centric route planning pipeline for the Meituan competition
 Requires-Python: >=3.9
 Requires-Dist: openai>=1.0.0
 Requires-Dist: pydantic>=2.0.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: streamlit>=1.45.0
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0.0; extra == "dev"

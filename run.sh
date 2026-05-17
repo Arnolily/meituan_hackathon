@@ -1,0 +1,1 @@
+python scripts/parse_intent.py '想要去费城吃一顿fine-dining，然后去高档的酒吧喝喝酒（有未成年人，所以酒吧最好要有无酒精饮品），大概凌晨两点回酒店。'

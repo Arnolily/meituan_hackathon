@@ -7,7 +7,7 @@ from typing import Optional
 from planner.config import DEFAULT_CACHE_DIR, DEFAULT_INTERIM_DIR
 from planner.io.intent_cache import load_intent_json
 from planner.io.poi_cache import save_cached_pois
-from planner.modules.poi_loader import load_candidate_pois
+from planner.modules.poi_loader import load_candidate_poi_groups
 from planner.schemas import AnchorPoint, Intent, SpatialConstraint
 
 
@@ -47,14 +47,14 @@ def main() -> None:
     intent = load_intent(args.intent_json, args.intent_file)
     business_file = args.business_file or resolve_business_file(intent)
     spatial_constraint = build_spatial_constraint(args)
-    pois = load_candidate_pois(
+    poi_groups = load_candidate_poi_groups(
         intent,
         business_file=business_file,
         max_pois=args.max_pois,
         spatial_constraint=spatial_constraint,
     )
     cache_path = save_cached_pois(
-        pois,
+        poi_groups,
         cache_dir=args.cache_dir,
         intent=intent,
         business_file=business_file,
@@ -63,7 +63,8 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "count": len(pois),
+                "event_count": len(poi_groups),
+                "total_poi_count": sum(len(group.pois) for group in poi_groups),
                 "business_file": str(business_file),
                 "spatial_filter": spatial_constraint.model_dump() if spatial_constraint is not None else None,
                 "cache_path": str(cache_path),

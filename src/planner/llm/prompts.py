@@ -11,34 +11,44 @@ INTENT_PARSER_SYSTEM_PROMPT = """You parse route-planning user requests into str
 
 Return only a JSON object with these fields:
 - city: string or null
-- target_area: string or null
-- goals: array of concise strings
-- categories: array of Yelp-style category hints
-- poi_types: array using planner-facing types such as food_drink, sightseeing, shopping, nightlife, lodging, service, wellness, activity
-- budget_level: one of low, medium, high, unknown
+- overall_goal: short string summarizing the full route request
 - start_time: HH:MM string or null
 - end_time: HH:MM string or null
 - return_location: string or null
-- hard_constraints: array of concise strings
-- soft_preferences: array of concise strings
+- hard_constraints: array of route-wide concise strings
+- soft_preferences: array of route-wide concise strings
+- events: array of event objects, each with:
+  - name: short event label or null
+  - goal: one allowed goal
+  - target_area: string or null
+  - categories: array of Yelp-style category hints
+  - poi_types: array using planner-facing types
+  - budget_level: one of low, medium, high, unknown
+  - hard_constraints: array of event-specific concise strings
+  - soft_preferences: array of event-specific concise strings
 - confidence: number from 0 to 1
 
 Rules:
-- Put hard requirements in hard_constraints.
-- Put preferences and quality desires in soft_preferences.
+- Put route-wide hard requirements in top-level hard_constraints.
+- Put route-wide preferences in top-level soft_preferences.
+- Put stop-specific hard requirements inside each event.hard_constraints.
+- Put stop-specific preferences inside each event.soft_preferences.
 - Use categories as retrieval hints, not final decisions.
 - Preserve sightseeing intent even if Yelp may not have enough sightseeing POIs.
-- `goals` must be chosen only from the allowed goal vocabulary below.
-- `categories` must be chosen only from the allowed retrieval vocabulary below.
-- `poi_types` must be chosen only from the allowed planner vocabulary below.
+- Each event.goal must be chosen only from the allowed goal vocabulary below.
+- Each event.categories entry must be chosen only from the allowed retrieval vocabulary below.
+- Each event.poi_types entry must be chosen only from the allowed planner vocabulary below.
 - `city` must use the canonical English dataset form when possible.
 - Never invent free-form category labels.
 - Never invent free-form goals.
 - If the user uses a specific phrase not present in the allowed categories, map it to the closest valid category.
 - Infer indirect meaning when it is strongly implied by the user's wording.
-- Example: `fine dining` implies `goals=["dinner"]`, `categories=["Restaurants"]`, `poi_types=["food_drink"]`, `budget_level="high"`, and a soft preference like `premium_experience`.
-- Example: `high-end bar` implies `goals=["nightlife"]`, `categories=["Bars", "Cocktail Bars"]`, `poi_types=["nightlife"]`, and a soft preference like `premium_experience`.
-- Example: `good restaurant` implies not just `Restaurants`, but also a quality-oriented soft preference such as `high_quality_food`.
+- Example: `fine dining` implies an event with `goal="dinner"`, `categories=["Restaurants"]`, `poi_types=["food_drink"]`, `budget_level="high"`, and a soft preference like `premium_experience`.
+- Example: `high-end bar` implies an event with `goal="nightlife"`, `categories=["Bars", "Cocktail Bars"]`, `poi_types=["nightlife"]`, and a soft preference like `premium_experience`.
+- Example: `good restaurant` implies not just `Restaurants`, but also a quality-oriented event soft preference such as `high_quality_food`.
+- When a query contains multiple stops, split them into multiple events.
+- When different stops imply different budgets or preferences, keep those differences at the event level.
+- The top-level overall_goal should summarize the whole plan, not just one event.
 
 Allowed goals:
 __ALLOWED_GOALS__
@@ -59,10 +69,11 @@ Canonicalization examples:
 
 Output discipline:
 - Use broad valid categories rather than invented specific labels.
-- Keep `goals` expressive, but keep `categories` controlled.
-- Put inferred quality, budget, romance, quietness, scenic preference, or premium preference into `soft_preferences`.
+- Keep event goals expressive, but keep categories controlled.
+- Put inferred quality, budget, romance, quietness, scenic preference, or premium preference into event soft_preferences when they apply to only one stop.
 - If the user does not explicitly provide a budget but strongly implies one, infer it.
 - If a field is unknown, return null or an empty array rather than guessing wildly.
+- events must contain at least one event.
 """
 
 INTENT_PARSER_SYSTEM_PROMPT = (
@@ -75,3 +86,47 @@ INTENT_PARSER_SYSTEM_PROMPT = (
 def build_intent_parser_user_prompt(query: str, default_city: Optional[str] = None) -> str:
     default_city_line = f"Default city: {default_city}" if default_city else "Default city: null"
     return f"{default_city_line}\nUser query: {query}"
+
+
+COMMENT_SUMMARIZER_SYSTEM_PROMPT = """You summarize POI user comments for route planning.
+
+Return only a JSON object with these fields:
+- summary: short natural-language summary focused on the current event intent
+- keywords: array of concise keywords or short phrases
+- pros: array of concise positive findings relevant to the current event intent
+- cons: array of concise negative findings relevant to the current event intent
+- notable_risks: array of concise risks or caveats relevant to the current event intent
+- evidence: array of short supporting snippets or paraphrased evidence points
+- confidence: number from 0 to 1
+
+Rules:
+- Focus on the user's overall query and the current event, not generic sentiment.
+- Use only the provided comments and tips as evidence.
+- Allow mixed evidence. The same aspect may appear in both pros and cons if comments conflict.
+- Prefer concise planner-facing language.
+- Do not invent facts that are not supported by the comments.
+- Keep keywords compact and useful for downstream route planning.
+- If comments are weak or sparse, say so in summary or risks instead of hallucinating detail.
+- Evidence should be short and selective, not a full restatement of all comments.
+"""
+
+
+def build_comment_summarizer_user_prompt(
+    *,
+    overall_intent: dict,
+    event_intent: dict,
+    poi: dict,
+    packed_reviews: list[str],
+    packed_tips: list[str],
+) -> str:
+    return __import__("json").dumps(
+        {
+            "overall_intent": overall_intent,
+            "event_intent": event_intent,
+            "poi": poi,
+            "reviews": packed_reviews,
+            "tips": packed_tips,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )

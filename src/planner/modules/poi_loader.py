@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from planner.schemas import GeoPoint, Intent, RawPOI, SpatialConstraint
+from planner.schemas import EventIntent, EventPOIGroup, GeoPoint, Intent, RawPOI, SpatialConstraint
 from planner.utils.geo import anchor_to_point, estimate_travel_minutes, haversine_distance_km
 from planner.vocab import GOAL_CATEGORY_HINTS, POI_TYPE_CATEGORY_HINTS
 
@@ -11,6 +11,66 @@ from planner.vocab import GOAL_CATEGORY_HINTS, POI_TYPE_CATEGORY_HINTS
 def load_candidate_pois(
     intent: Intent,
     *,
+    business_file: Path,
+    max_pois: Optional[int] = None,
+    spatial_constraint: Optional[SpatialConstraint] = None,
+) -> list[RawPOI]:
+    groups = load_candidate_poi_groups(
+        intent,
+        business_file=business_file,
+        max_pois=max_pois,
+        spatial_constraint=spatial_constraint,
+    )
+    deduped: dict[str, RawPOI] = {}
+    for group in groups:
+        for poi in group.pois:
+            current = deduped.get(poi.business_id)
+            if current is None or poi.retrieval_score > current.retrieval_score:
+                deduped[poi.business_id] = poi
+    return sorted(
+        deduped.values(),
+        key=lambda poi: (
+            -poi.retrieval_score,
+            poi.distance_to_anchor_km is None,
+            poi.distance_to_anchor_km if poi.distance_to_anchor_km is not None else float("inf"),
+            -poi.review_count,
+            -poi.stars,
+            poi.name,
+        ),
+    )
+
+
+def load_candidate_poi_groups(
+    intent: Intent,
+    *,
+    business_file: Path,
+    max_pois: Optional[int] = None,
+    spatial_constraint: Optional[SpatialConstraint] = None,
+) -> list[EventPOIGroup]:
+    groups: list[EventPOIGroup] = []
+    for index, event in enumerate(intent.events, start=1):
+        pois = _load_candidate_pois_for_event(
+            intent,
+            event=event,
+            business_file=business_file,
+            max_pois=max_pois,
+            spatial_constraint=spatial_constraint,
+        )
+        groups.append(
+            EventPOIGroup(
+                event_index=index,
+                event_name=event.name or f"event_{index}",
+                event_goal=event.goal,
+                pois=pois,
+            )
+        )
+    return groups
+
+
+def _load_candidate_pois_for_event(
+    intent: Intent,
+    *,
+    event: EventIntent,
     business_file: Path,
     max_pois: Optional[int] = None,
     spatial_constraint: Optional[SpatialConstraint] = None,
@@ -23,7 +83,7 @@ def load_candidate_pois(
                 continue
             record = json.loads(line)
             poi = normalize_business_record(record)
-            scored_poi = _score_against_intent(poi, intent)
+            scored_poi = _score_against_event(poi, intent, event)
             if scored_poi.retrieval_score <= 0:
                 continue
             if spatial_constraint is not None:
@@ -73,17 +133,26 @@ def normalize_business_record(record: dict[str, Any]) -> RawPOI:
     )
 
 
-def _score_against_intent(poi: RawPOI, intent: Intent) -> RawPOI:
+def _score_against_event(poi: RawPOI, intent: Intent, event: EventIntent) -> RawPOI:
     score = 0.0
     reasons: list[str] = []
+    breakdown: dict[str, float] = {}
+    trace: list[dict[str, Any]] = []
 
     if intent.city and poi.city.lower() != intent.city.lower():
-        return poi.model_copy(update={"retrieval_score": 0.0, "retrieval_reasons": ["city_mismatch"]})
+        return poi.model_copy(
+            update={
+                "retrieval_score": 0.0,
+                "retrieval_reasons": ["city_mismatch"],
+                "retrieval_breakdown": {},
+                "retrieval_trace": [{"component": "city_gate", "delta": 0.0, "reason": "city_mismatch"}],
+            }
+        )
 
     poi_categories = {category.lower() for category in poi.categories}
-    if intent.categories:
+    if event.categories:
         category_hits = 0
-        for wanted in intent.categories:
+        for wanted in event.categories:
             wanted_lower = wanted.lower()
             if wanted_lower in poi_categories:
                 category_hits += 1
@@ -92,144 +161,247 @@ def _score_against_intent(poi: RawPOI, intent: Intent) -> RawPOI:
                 category_hits += 1
                 reasons.append(f"category_partial={wanted}")
         if category_hits == 0:
-            return poi.model_copy(update={"retrieval_score": 0.0, "retrieval_reasons": ["no_category_match"]})
-        score += 10.0 + (2.0 * category_hits)
+            return poi.model_copy(
+                update={
+                    "retrieval_score": 0.0,
+                    "retrieval_reasons": ["no_category_match"],
+                    "retrieval_breakdown": {},
+                    "retrieval_trace": [{"component": "category_gate", "delta": 0.0, "reason": "no_category_match"}],
+                }
+            )
+        category_score = 10.0 + (2.0 * category_hits)
+        score += category_score
+        _add_contribution(
+            breakdown,
+            trace,
+            component="category_match",
+            delta=category_score,
+            reason=f"{category_hits} category hit(s)",
+        )
 
-    if intent.poi_types:
+    if event.poi_types:
         poi_type_hits = 0
-        for poi_type in intent.poi_types:
+        for poi_type in event.poi_types:
             hints = POI_TYPE_CATEGORY_HINTS.get(poi_type, set())
             if hints and poi_categories.intersection(hints):
                 poi_type_hits += 1
                 reasons.append(f"poi_type={poi_type}")
-        score += 2.0 * poi_type_hits
+        poi_type_score = 2.0 * poi_type_hits
+        score += poi_type_score
+        if poi_type_score:
+            _add_contribution(
+                breakdown,
+                trace,
+                component="poi_type_match",
+                delta=poi_type_score,
+                reason=f"{poi_type_hits} poi_type hit(s)",
+            )
 
-    if intent.goals:
-        goal_hits = 0
-        for goal in intent.goals:
-            hints = GOAL_CATEGORY_HINTS.get(goal.lower(), set())
-            if hints and poi_categories.intersection(hints):
-                goal_hits += 1
-                reasons.append(f"goal={goal}")
-        score += 1.5 * goal_hits
+    hints = GOAL_CATEGORY_HINTS.get(event.goal.lower(), set())
+    if hints and poi_categories.intersection(hints):
+        score += 1.5
+        reasons.append(f"goal={event.goal}")
+        _add_contribution(breakdown, trace, component="goal_match", delta=1.5, reason=f"goal={event.goal}")
 
-    if intent.target_area:
+    if event.target_area:
         area_text = f"{poi.name} {poi.address}".lower()
-        if intent.target_area.lower() in area_text:
+        if event.target_area.lower() in area_text:
             score += 3.0
             reasons.append("target_area_match")
+            _add_contribution(breakdown, trace, component="target_area_match", delta=3.0, reason="target_area_match")
 
-    score += _budget_score(intent, poi, reasons)
-    score += _soft_preference_score(intent, poi, poi_categories, reasons)
-    score += _hard_constraint_score(intent, poi, poi_categories, reasons)
+    score += _budget_score(event, poi, reasons, breakdown, trace)
+    score += _soft_preference_score(intent, event, poi, poi_categories, reasons, breakdown, trace)
+    score += _hard_constraint_score(intent, event, poi, poi_categories, reasons, breakdown, trace)
 
     quality_score = min(poi.stars, 5.0) * 0.4 + min(poi.review_count, 1000) / 1000.0
     score += quality_score
+    _add_contribution(
+        breakdown,
+        trace,
+        component="quality_prior",
+        delta=round(quality_score, 3),
+        reason=f"stars={poi.stars}, reviews={poi.review_count}",
+    )
     if poi.price_level is None:
         score -= 0.25
         reasons.append("price_unknown")
+        _add_contribution(breakdown, trace, component="price_unknown_penalty", delta=-0.25, reason="price_unknown")
 
-    return poi.model_copy(update={"retrieval_score": round(score, 3), "retrieval_reasons": reasons})
+    rounded_score = round(score, 3)
+    rounded_breakdown = {key: round(value, 3) for key, value in breakdown.items()}
+    rounded_trace = [{**item, "delta": round(float(item["delta"]), 3)} for item in trace]
+    return poi.model_copy(
+        update={
+            "retrieval_score": rounded_score,
+            "retrieval_reasons": reasons,
+            "retrieval_breakdown": rounded_breakdown,
+            "retrieval_trace": rounded_trace,
+        }
+    )
 
 
-def _budget_score(intent: Intent, poi: RawPOI, reasons: list[str]) -> float:
-    if intent.budget_level == "unknown" or poi.price_tier is None:
+def _budget_score(
+    event: EventIntent,
+    poi: RawPOI,
+    reasons: list[str],
+    breakdown: dict[str, float],
+    trace: list[dict[str, Any]],
+) -> float:
+    if event.budget_level == "unknown" or poi.price_tier is None:
         return 0.0
-    if intent.budget_level == "low":
+    if event.budget_level == "low":
         if poi.price_tier == 1:
             reasons.append("budget_match_low")
+            _add_contribution(breakdown, trace, component="budget_fit", delta=3.0, reason="budget_match_low")
             return 3.0
         if poi.price_tier == 2:
             reasons.append("budget_near_low")
+            _add_contribution(breakdown, trace, component="budget_fit", delta=1.0, reason="budget_near_low")
             return 1.0
         reasons.append("budget_penalty_high_cost")
+        _add_contribution(breakdown, trace, component="budget_fit", delta=-3.0, reason="budget_penalty_high_cost")
         return -3.0
-    if intent.budget_level == "medium":
+    if event.budget_level == "medium":
         if poi.price_tier == 2:
             reasons.append("budget_match_medium")
+            _add_contribution(breakdown, trace, component="budget_fit", delta=3.0, reason="budget_match_medium")
             return 3.0
         if poi.price_tier in {1, 3}:
             reasons.append("budget_near_medium")
+            _add_contribution(breakdown, trace, component="budget_fit", delta=1.0, reason="budget_near_medium")
             return 1.0
+        _add_contribution(breakdown, trace, component="budget_fit", delta=-1.5, reason="budget_penalty_far_medium")
         return -1.5
-    if intent.budget_level == "high":
+    if event.budget_level == "high":
         if poi.price_tier >= 3:
             reasons.append("budget_match_high")
+            _add_contribution(breakdown, trace, component="budget_fit", delta=4.0, reason="budget_match_high")
             return 4.0
         if poi.price_tier == 2:
             reasons.append("budget_penalty_not_premium")
+            _add_contribution(breakdown, trace, component="budget_fit", delta=-1.5, reason="budget_penalty_not_premium")
             return -1.5
         reasons.append("budget_penalty_low_cost")
+        _add_contribution(breakdown, trace, component="budget_fit", delta=-3.0, reason="budget_penalty_low_cost")
         return -3.0
     return 0.0
 
 
-def _soft_preference_score(intent: Intent, poi: RawPOI, poi_categories: set[str], reasons: list[str]) -> float:
+def _soft_preference_score(
+    intent: Intent,
+    event: EventIntent,
+    poi: RawPOI,
+    poi_categories: set[str],
+    reasons: list[str],
+    breakdown: dict[str, float],
+    trace: list[dict[str, Any]],
+) -> float:
     score = 0.0
     attributes = poi.attributes
     soft_prefs = {pref.lower() for pref in intent.soft_preferences}
+    soft_prefs.update(pref.lower() for pref in event.soft_preferences)
 
     if "premium_experience" in soft_prefs:
         if poi.price_tier and poi.price_tier >= 3:
             score += 3.0
             reasons.append("pref_premium_price")
+            _add_contribution(breakdown, trace, component="soft_preference", delta=3.0, reason="pref_premium_price")
         ambience = attributes.get("Ambience")
         if isinstance(ambience, dict) and any(ambience.get(flag) for flag in ["classy", "upscale", "intimate", "trendy"]):
             score += 1.5
             reasons.append("pref_premium_ambience")
+            _add_contribution(breakdown, trace, component="soft_preference", delta=1.5, reason="pref_premium_ambience")
         if attributes.get("RestaurantsReservations") is True:
             score += 0.75
             reasons.append("pref_reservations")
+            _add_contribution(breakdown, trace, component="soft_preference", delta=0.75, reason="pref_reservations")
 
     if "high_quality_food" in soft_prefs:
         if "restaurants" in poi_categories:
             score += 1.0
             reasons.append("pref_food_category")
+            _add_contribution(breakdown, trace, component="soft_preference", delta=1.0, reason="pref_food_category")
         if poi.stars >= 4.3:
             score += 1.5
             reasons.append("pref_high_rating")
+            _add_contribution(breakdown, trace, component="soft_preference", delta=1.5, reason="pref_high_rating")
 
     if "high_end_atmosphere" in soft_prefs:
         ambience = attributes.get("Ambience")
         if isinstance(ambience, dict) and any(ambience.get(flag) for flag in ["classy", "upscale", "romantic", "trendy"]):
             score += 1.5
             reasons.append("pref_atmosphere")
+            _add_contribution(breakdown, trace, component="soft_preference", delta=1.5, reason="pref_atmosphere")
         if "bars" in poi_categories or "cocktail bars" in poi_categories:
             score += 0.75
             reasons.append("pref_bar_atmosphere")
+            _add_contribution(breakdown, trace, component="soft_preference", delta=0.75, reason="pref_bar_atmosphere")
 
     if "budget_sensitive" in soft_prefs and poi.price_tier is not None:
         if poi.price_tier == 1:
             score += 2.0
             reasons.append("pref_budget_value")
+            _add_contribution(breakdown, trace, component="soft_preference", delta=2.0, reason="pref_budget_value")
         elif poi.price_tier >= 3:
             score -= 2.0
             reasons.append("pref_budget_penalty")
+            _add_contribution(breakdown, trace, component="soft_preference", delta=-2.0, reason="pref_budget_penalty")
 
     if "good_view" in soft_prefs and attributes.get("OutdoorSeating") is True:
         score += 0.5
         reasons.append("pref_outdoor")
+        _add_contribution(breakdown, trace, component="soft_preference", delta=0.5, reason="pref_outdoor")
 
     return score
 
 
-def _hard_constraint_score(intent: Intent, poi: RawPOI, poi_categories: set[str], reasons: list[str]) -> float:
+def _hard_constraint_score(
+    intent: Intent,
+    event: EventIntent,
+    poi: RawPOI,
+    poi_categories: set[str],
+    reasons: list[str],
+    breakdown: dict[str, float],
+    trace: list[dict[str, Any]],
+) -> float:
     score = 0.0
-    hard_constraints = " ".join(intent.hard_constraints).lower()
+    hard_constraints = " ".join(intent.hard_constraints + event.hard_constraints).lower()
 
     if "must_include_dinner" in hard_constraints and "restaurants" in poi_categories:
         score += 2.0
         reasons.append("constraint_dinner")
+        _add_contribution(breakdown, trace, component="hard_constraint", delta=2.0, reason="constraint_dinner")
 
     if "minor present" in hard_constraints or "non-alcoholic" in hard_constraints:
         if poi.attributes.get("GoodForKids") is True:
             score += 1.0
             reasons.append("constraint_minor_friendly")
+            _add_contribution(breakdown, trace, component="hard_constraint", delta=1.0, reason="constraint_minor_friendly")
         if "coffee & tea" in poi_categories or "cafes" in poi_categories:
             score += 1.0
             reasons.append("constraint_non_alcoholic_option")
+            _add_contribution(
+                breakdown,
+                trace,
+                component="hard_constraint",
+                delta=1.0,
+                reason="constraint_non_alcoholic_option",
+            )
 
     return score
+
+
+def _add_contribution(
+    breakdown: dict[str, float],
+    trace: list[dict[str, Any]],
+    *,
+    component: str,
+    delta: float,
+    reason: str,
+) -> None:
+    breakdown[component] = breakdown.get(component, 0.0) + delta
+    trace.append({"component": component, "delta": delta, "reason": reason})
 
 
 def _annotate_spatial_fields(poi: RawPOI, spatial_constraint: SpatialConstraint) -> RawPOI:

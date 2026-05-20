@@ -2,7 +2,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from planner.vocab import ALLOWED_CATEGORIES, ALLOWED_GOALS, ALLOWED_POI_TYPES
 
@@ -88,28 +88,31 @@ BudgetLevel = Literal["low", "medium", "high", "unknown"]
 IntentParseMethod = Literal["llm"]
 
 
-class Intent(BaseModel):
-    raw_query: str
-    city: Optional[str] = None
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value not in seen:
+            ordered.append(value)
+            seen.add(value)
+    return ordered
+
+
+class EventIntent(BaseModel):
+    name: Optional[str] = None
+    goal: str
     target_area: Optional[str] = None
-    goals: list[str] = Field(default_factory=list)
     categories: list[str] = Field(default_factory=list)
     poi_types: list[str] = Field(default_factory=list)
     budget_level: BudgetLevel = "unknown"
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    return_location: Optional[str] = None
     hard_constraints: list[str] = Field(default_factory=list)
     soft_preferences: list[str] = Field(default_factory=list)
-    parse_method: IntentParseMethod = "llm"
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
-    @field_validator("goals")
+    @field_validator("goal")
     @classmethod
-    def validate_goals(cls, value: list[str]) -> list[str]:
-        invalid = [item for item in value if item not in ALLOWED_GOALS]
-        if invalid:
-            raise ValueError(f"Invalid goals: {invalid}. Allowed goals: {ALLOWED_GOALS}")
+    def validate_goal(cls, value: str) -> str:
+        if value not in ALLOWED_GOALS:
+            raise ValueError(f"Invalid goal: {value}. Allowed goals: {ALLOWED_GOALS}")
         return value
 
     @field_validator("categories")
@@ -128,12 +131,116 @@ class Intent(BaseModel):
             raise ValueError(f"Invalid poi_types: {invalid}. Allowed poi_types: {ALLOWED_POI_TYPES}")
         return value
 
+
+class Intent(BaseModel):
+    raw_query: str
+    city: Optional[str] = None
+    overall_goal: str = ""
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    return_location: Optional[str] = None
+    hard_constraints: list[str] = Field(default_factory=list)
+    soft_preferences: list[str] = Field(default_factory=list)
+    events: list[EventIntent] = Field(default_factory=list)
+    parse_method: IntentParseMethod = "llm"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
     @classmethod
     def from_llm_payload(cls, payload: dict[str, Any], *, raw_query: str) -> "Intent":
         payload = dict(payload)
         payload["raw_query"] = raw_query
         payload["parse_method"] = "llm"
         return cls.model_validate(payload)
+
+    @classmethod
+    def _coerce_legacy_event(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        legacy_goals = payload.pop("goals", []) or []
+        legacy_categories = payload.pop("categories", []) or []
+        legacy_poi_types = payload.pop("poi_types", []) or []
+        legacy_budget_level = payload.pop("budget_level", "unknown")
+        legacy_target_area = payload.pop("target_area", None)
+        legacy_hard_constraints = list(payload.get("hard_constraints", []) or [])
+        legacy_soft_preferences = list(payload.get("soft_preferences", []) or [])
+
+        events: list[dict[str, Any]] = []
+        if legacy_goals:
+            for index, goal in enumerate(legacy_goals):
+                events.append(
+                    {
+                        "name": f"event_{index + 1}",
+                        "goal": goal,
+                        "target_area": legacy_target_area if index == 0 else None,
+                        "categories": list(legacy_categories),
+                        "poi_types": list(legacy_poi_types),
+                        "budget_level": legacy_budget_level,
+                        "hard_constraints": list(legacy_hard_constraints),
+                        "soft_preferences": list(legacy_soft_preferences),
+                    }
+                )
+        else:
+            events.append(
+                {
+                    "name": "event_1",
+                    "goal": "sightseeing",
+                    "target_area": legacy_target_area,
+                    "categories": list(legacy_categories),
+                    "poi_types": list(legacy_poi_types),
+                    "budget_level": legacy_budget_level,
+                    "hard_constraints": list(legacy_hard_constraints),
+                    "soft_preferences": list(legacy_soft_preferences),
+                }
+            )
+
+        payload["events"] = events
+        if not payload.get("overall_goal"):
+            payload["overall_goal"] = payload.get("raw_query") or "route planning"
+        return payload
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_legacy_shape(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        payload = dict(data)
+        if "events" not in payload:
+            payload = cls._coerce_legacy_event(payload)
+        if not payload.get("overall_goal"):
+            payload["overall_goal"] = payload.get("raw_query") or "route planning"
+        return payload
+
+    @model_validator(mode="after")
+    def validate_events(self) -> "Intent":
+        if not self.events:
+            raise ValueError("Intent.events must contain at least one event.")
+        return self
+
+    @property
+    def target_area(self) -> Optional[str]:
+        for event in self.events:
+            if event.target_area:
+                return event.target_area
+        return None
+
+    @property
+    def goals(self) -> list[str]:
+        return _unique_strings([event.goal for event in self.events])
+
+    @property
+    def categories(self) -> list[str]:
+        return _unique_strings([category for event in self.events for category in event.categories])
+
+    @property
+    def poi_types(self) -> list[str]:
+        return _unique_strings([poi_type for event in self.events for poi_type in event.poi_types])
+
+    @property
+    def budget_level(self) -> BudgetLevel:
+        levels = {event.budget_level for event in self.events if event.budget_level != "unknown"}
+        if not levels:
+            return "unknown"
+        if len(levels) == 1:
+            return next(iter(levels))
+        return "unknown"
 
 
 class RawPOI(BaseModel):
@@ -157,6 +264,15 @@ class RawPOI(BaseModel):
     estimated_travel_minutes: Optional[float] = None
     retrieval_score: float = 0.0
     retrieval_reasons: list[str] = Field(default_factory=list)
+    retrieval_breakdown: dict[str, float] = Field(default_factory=dict)
+    retrieval_trace: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EventPOIGroup(BaseModel):
+    event_index: int
+    event_name: str
+    event_goal: str
+    pois: list[RawPOI] = Field(default_factory=list)
 
 
 class ReviewComment(BaseModel):
@@ -187,6 +303,34 @@ class POICommentBundle(BaseModel):
     tip_count_loaded: int = 0
     reviews: list[ReviewComment] = Field(default_factory=list)
     tips: list[TipComment] = Field(default_factory=list)
+
+
+class EventCommentGroup(BaseModel):
+    event_index: int
+    event_name: str
+    event_goal: str
+    bundles: list[POICommentBundle] = Field(default_factory=list)
+
+
+class POICommentSummary(BaseModel):
+    business_id: str
+    name: str
+    city: str
+    summary: str
+    keywords: list[str] = Field(default_factory=list)
+    pros: list[str] = Field(default_factory=list)
+    cons: list[str] = Field(default_factory=list)
+    notable_risks: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    inference_seconds: Optional[float] = None
+
+
+class EventCommentSummaryGroup(BaseModel):
+    event_index: int
+    event_name: str
+    event_goal: str
+    summaries: list[POICommentSummary] = Field(default_factory=list)
 
 
 class GeoPoint(BaseModel):

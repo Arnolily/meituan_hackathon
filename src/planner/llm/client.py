@@ -11,9 +11,9 @@ class OpenAICompatibleClient:
     changing `base_url`, `api_key`, and `model`.
     """
 
-    def __init__(self, *, api_key: str, base_url: Optional[str] = None, model: str) -> None:
+    def __init__(self, *, api_key: str, base_url: Optional[str] = None, model: str, timeout: float = 60.0) -> None:
         self.model = model
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
     def generate_json(self, *, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Dict[str, Any]:
         response = self.client.chat.completions.create(
@@ -27,4 +27,3 @@ class OpenAICompatibleClient:
         )
         content = response.choices[0].message.content or "{}"
         return __import__("json").loads(content)
-

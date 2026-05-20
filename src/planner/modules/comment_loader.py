@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from planner.io.yelp_reader import iter_jsonl
-from planner.schemas import POICommentBundle, RawPOI, ReviewComment, TipComment
+from planner.schemas import EventCommentGroup, EventPOIGroup, POICommentBundle, RawPOI, ReviewComment, TipComment
 
 
 def load_comment_bundles(
@@ -63,6 +63,31 @@ def load_comment_bundles(
     return ordered_bundles
 
 
+def load_event_comment_groups(
+    poi_groups: Sequence[EventPOIGroup],
+    *,
+    review_file: Path,
+    tip_file: Path,
+    max_reviews_per_poi: int = 20,
+    max_tips_per_poi: int = 10,
+) -> list[EventCommentGroup]:
+    return [
+        EventCommentGroup(
+            event_index=group.event_index,
+            event_name=group.event_name,
+            event_goal=group.event_goal,
+            bundles=load_comment_bundles(
+                group.pois,
+                review_file=review_file,
+                tip_file=tip_file,
+                max_reviews_per_poi=max_reviews_per_poi,
+                max_tips_per_poi=max_tips_per_poi,
+            ),
+        )
+        for group in poi_groups
+    ]
+
+
 def normalize_review_record(record: dict) -> ReviewComment:
     return ReviewComment(
         review_id=str(record.get("review_id") or ""),
@@ -89,3 +114,17 @@ def normalize_tip_record(record: dict) -> TipComment:
 
 def load_pois_json(pois_payload: Iterable[dict]) -> list[RawPOI]:
     return [RawPOI.model_validate(item) for item in pois_payload]
+
+
+def load_poi_groups_json(groups_payload: Iterable[dict]) -> list[EventPOIGroup]:
+    items = list(groups_payload)
+    if items and "business_id" in items[0]:
+        return [
+            EventPOIGroup(
+                event_index=1,
+                event_name="event_1",
+                event_goal="sightseeing",
+                pois=load_pois_json(items),
+            )
+        ]
+    return [EventPOIGroup.model_validate(item) for item in items]

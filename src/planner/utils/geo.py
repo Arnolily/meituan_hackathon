@@ -7,7 +7,7 @@ EARTH_RADIUS_KM = 6371.0
 MODE_SPEED_KMH = {
     "walking": 4.5,
     "driving": 25.0,
-    "transit": 18.0,
+    "cycling": 15.0,
 }
 
 

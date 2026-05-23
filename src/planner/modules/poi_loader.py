@@ -84,7 +84,7 @@ def _load_candidate_pois_for_event(
             record = json.loads(line)
             poi = normalize_business_record(record)
             scored_poi = _score_against_event(poi, intent, event)
-            if scored_poi.retrieval_score <= 0:
+            if _failed_semantic_gate(scored_poi):
                 continue
             if spatial_constraint is not None:
                 scored_poi = _annotate_spatial_fields(scored_poi, spatial_constraint)
@@ -223,11 +223,6 @@ def _score_against_event(poi: RawPOI, intent: Intent, event: EventIntent) -> Raw
         delta=round(quality_score, 3),
         reason=f"stars={poi.stars}, reviews={poi.review_count}",
     )
-    if poi.price_level is None:
-        score -= 0.25
-        reasons.append("price_unknown")
-        _add_contribution(breakdown, trace, component="price_unknown_penalty", delta=-0.25, reason="price_unknown")
-
     rounded_score = round(score, 3)
     rounded_breakdown = {key: round(value, 3) for key, value in breakdown.items()}
     rounded_trace = [{**item, "delta": round(float(item["delta"]), 3)} for item in trace]
@@ -241,6 +236,10 @@ def _score_against_event(poi: RawPOI, intent: Intent, event: EventIntent) -> Raw
     )
 
 
+def _failed_semantic_gate(poi: RawPOI) -> bool:
+    return any(reason in {"city_mismatch", "no_category_match"} for reason in poi.retrieval_reasons)
+
+
 def _budget_score(
     event: EventIntent,
     poi: RawPOI,
@@ -248,43 +247,48 @@ def _budget_score(
     breakdown: dict[str, float],
     trace: list[dict[str, Any]],
 ) -> float:
-    if event.budget_level == "unknown" or poi.price_tier is None:
+    if event.budget_level == "unknown":
         return 0.0
+    if poi.price_tier is None:
+        reasons.append("price_unknown")
+        _add_contribution(breakdown, trace, component="budget_fit", delta=-20.0, reason="price_unknown")
+        return -20.0
     if event.budget_level == "low":
         if poi.price_tier == 1:
             reasons.append("budget_match_low")
-            _add_contribution(breakdown, trace, component="budget_fit", delta=3.0, reason="budget_match_low")
-            return 3.0
+            _add_contribution(breakdown, trace, component="budget_fit", delta=100.0, reason="budget_match_low")
+            return 100.0
         if poi.price_tier == 2:
             reasons.append("budget_near_low")
-            _add_contribution(breakdown, trace, component="budget_fit", delta=1.0, reason="budget_near_low")
-            return 1.0
+            _add_contribution(breakdown, trace, component="budget_fit", delta=-30.0, reason="budget_near_low")
+            return -30.0
         reasons.append("budget_penalty_high_cost")
-        _add_contribution(breakdown, trace, component="budget_fit", delta=-3.0, reason="budget_penalty_high_cost")
-        return -3.0
+        _add_contribution(breakdown, trace, component="budget_fit", delta=-100.0, reason="budget_penalty_high_cost")
+        return -100.0
     if event.budget_level == "medium":
         if poi.price_tier == 2:
             reasons.append("budget_match_medium")
-            _add_contribution(breakdown, trace, component="budget_fit", delta=3.0, reason="budget_match_medium")
-            return 3.0
+            _add_contribution(breakdown, trace, component="budget_fit", delta=100.0, reason="budget_match_medium")
+            return 100.0
         if poi.price_tier in {1, 3}:
             reasons.append("budget_near_medium")
-            _add_contribution(breakdown, trace, component="budget_fit", delta=1.0, reason="budget_near_medium")
-            return 1.0
-        _add_contribution(breakdown, trace, component="budget_fit", delta=-1.5, reason="budget_penalty_far_medium")
-        return -1.5
+            _add_contribution(breakdown, trace, component="budget_fit", delta=20.0, reason="budget_near_medium")
+            return 20.0
+        reasons.append("budget_penalty_far_medium")
+        _add_contribution(breakdown, trace, component="budget_fit", delta=-60.0, reason="budget_penalty_far_medium")
+        return -60.0
     if event.budget_level == "high":
         if poi.price_tier >= 3:
             reasons.append("budget_match_high")
-            _add_contribution(breakdown, trace, component="budget_fit", delta=4.0, reason="budget_match_high")
-            return 4.0
+            _add_contribution(breakdown, trace, component="budget_fit", delta=100.0, reason="budget_match_high")
+            return 100.0
         if poi.price_tier == 2:
             reasons.append("budget_penalty_not_premium")
-            _add_contribution(breakdown, trace, component="budget_fit", delta=-1.5, reason="budget_penalty_not_premium")
-            return -1.5
+            _add_contribution(breakdown, trace, component="budget_fit", delta=-30.0, reason="budget_penalty_not_premium")
+            return -30.0
         reasons.append("budget_penalty_low_cost")
-        _add_contribution(breakdown, trace, component="budget_fit", delta=-3.0, reason="budget_penalty_low_cost")
-        return -3.0
+        _add_contribution(breakdown, trace, component="budget_fit", delta=-80.0, reason="budget_penalty_low_cost")
+        return -80.0
     return 0.0
 
 

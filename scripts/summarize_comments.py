@@ -32,6 +32,9 @@ def parse_args() -> argparse.Namespace:
         help="Cache directory for comment summary JSON artifacts.",
     )
     parser.add_argument("--max-summaries-per-event", type=int, default=10, help="Maximum POIs to summarize per event.")
+    parser.add_argument("--batch-size", type=int, default=7, help="Number of POIs to summarize per LLM call.")
+    parser.add_argument("--max-parallel-batches", type=int, default=2, help="Maximum LLM batch requests to run at once.")
+    parser.add_argument("--batch-retries", type=int, default=3, help="Number of times to retry a failed batch.")
     return parser.parse_args()
 
 
@@ -56,6 +59,9 @@ def main() -> None:
                 "event_count": len(comment_groups),
                 "planned_summary_count": planned_count,
                 "max_summaries_per_event": args.max_summaries_per_event,
+                "batch_size": args.batch_size,
+                "max_parallel_batches": args.max_parallel_batches,
+                "batch_retries": args.batch_retries,
                 "timeout_sec": timeout,
             },
             ensure_ascii=False,
@@ -67,6 +73,9 @@ def main() -> None:
         comment_groups,
         llm_client=client,
         max_bundles_per_event=args.max_summaries_per_event,
+        batch_size=args.batch_size,
+        max_parallel_batches=args.max_parallel_batches,
+        batch_retries=args.batch_retries,
         progress_callback=lambda update: print(
             json.dumps(
                 {

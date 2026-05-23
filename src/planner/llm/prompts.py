@@ -111,6 +111,38 @@ Rules:
 """
 
 
+COMMENT_BATCH_SUMMARIZER_SYSTEM_PROMPT = """You summarize POI user comments for route planning.
+
+Return only a JSON object with this shape:
+{
+  "summaries": [
+    {
+      "business_id": "same business_id as the input POI",
+      "summary": "short natural-language summary focused on the current event intent",
+      "keywords": ["concise keyword or short phrase"],
+      "pros": ["concise positive finding relevant to the current event intent"],
+      "cons": ["concise negative finding relevant to the current event intent"],
+      "notable_risks": ["concise risk or caveat relevant to the current event intent"],
+      "evidence": ["short supporting snippet or paraphrased evidence point"],
+      "confidence": 0.8
+    }
+  ]
+}
+
+Rules:
+- Return exactly one summary item for each input POI.
+- Preserve every input business_id exactly.
+- Focus on the user's overall query and the current event, not generic sentiment.
+- Use only the provided comments and tips as evidence.
+- Allow mixed evidence. The same aspect may appear in both pros and cons if comments conflict.
+- Prefer concise planner-facing language.
+- Do not invent facts that are not supported by the comments.
+- Keep keywords compact and useful for downstream route planning.
+- If comments are weak or sparse, say so in summary or risks instead of hallucinating detail.
+- Evidence should be short and selective, not a full restatement of all comments.
+"""
+
+
 def build_comment_summarizer_user_prompt(
     *,
     overall_intent: dict,
@@ -126,6 +158,23 @@ def build_comment_summarizer_user_prompt(
             "poi": poi,
             "reviews": packed_reviews,
             "tips": packed_tips,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def build_comment_batch_summarizer_user_prompt(
+    *,
+    overall_intent: dict,
+    event_intent: dict,
+    pois: list[dict],
+) -> str:
+    return __import__("json").dumps(
+        {
+            "overall_intent": overall_intent,
+            "event_intent": event_intent,
+            "pois": pois,
         },
         ensure_ascii=False,
         indent=2,

@@ -12,13 +12,19 @@ from planner.config import DEFAULT_CACHE_DIR, load_env_file
 from planner.io.intent_cache import load_intent_json, save_cached_intent
 from planner.io.comment_cache import save_cached_comments
 from planner.io.comment_summary_cache import save_cached_comment_summaries
+from planner.io.poi_aggregation_cache import save_cached_aggregated_pois
 from planner.io.poi_cache import save_cached_pois
+from planner.io.route_cache import save_cached_routes
 from planner.llm.client import OpenAICompatibleClient
 from planner.modules.comment_loader import load_event_comment_groups, load_poi_groups_json
 from planner.modules.comment_summarizer import summarize_event_comment_groups
+from planner.modules.intent_clarifier import apply_clarification_answers, build_clarification_plan, build_poi_refinement_plan
+from planner.modules.ors_client import OpenRouteServiceDirectionClient
 from planner.modules.intent_parser import parse_intent
+from planner.modules.poi_aggregator import aggregate_event_poi_groups
 from planner.modules.poi_loader import load_candidate_poi_groups
-from planner.schemas import AnchorPoint, EventCommentGroup, Intent, SpatialConstraint
+from planner.modules.route_finder import find_route_candidates
+from planner.schemas import AnchorPoint, EventAggregatedPOIGroup, EventCommentGroup, EventCommentSummaryGroup, Intent, SpatialConstraint
 from scripts.load_comments import resolve_comment_files
 from scripts.load_pois import resolve_business_file
 
@@ -46,6 +52,12 @@ def load_latest_intent(cache_dir: Path) -> Intent | None:
     return intent
 
 
+def save_latest_intent(cache_dir: Path, intent: Intent) -> None:
+    path = cache_dir / "intents" / "latest_intent.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(intent.model_dump_json(indent=2), encoding="utf-8")
+
+
 def load_latest_pois(cache_dir: Path) -> list[dict]:
     path = cache_dir / "pois" / "latest_pois.json"
     if not path.exists():
@@ -62,6 +74,20 @@ def load_latest_comments(cache_dir: Path) -> list[dict]:
 
 def load_latest_comment_summaries(cache_dir: Path) -> list[dict]:
     path = cache_dir / "comment_summaries" / "latest_comment_summaries.json"
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_latest_aggregated_pois(cache_dir: Path) -> list[dict]:
+    path = cache_dir / "aggregated_pois" / "latest_aggregated_pois.json"
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_latest_routes(cache_dir: Path) -> list[dict]:
+    path = cache_dir / "routes" / "latest_routes.json"
     if not path.exists():
         return []
     return json.loads(path.read_text(encoding="utf-8"))
@@ -191,6 +217,49 @@ def build_comment_summary_table(summaries: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def build_aggregated_poi_table(pois: list[dict]) -> pd.DataFrame:
+    rows = []
+    for poi in pois:
+        rows.append(
+            {
+                "event": poi.get("event_name") or poi.get("event_goal"),
+                "name": poi.get("name"),
+                "aggregate_score": poi.get("aggregate_score"),
+                "retrieval_score": poi.get("retrieval_score"),
+                "stars": poi.get("stars"),
+                "review_count": poi.get("review_count"),
+                "price_level": poi.get("price_level"),
+                "keywords": ", ".join(poi.get("comment_keywords", [])[:6]),
+                "risks": len(poi.get("comment_notable_risks", [])),
+                "summary": poi.get("comment_summary_available"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_route_table(routes: list[dict]) -> pd.DataFrame:
+    rows = []
+    for index, route in enumerate(routes, start=1):
+        rows.append(
+            {
+                "rank": index,
+                "score": route.get("score"),
+                "feasible": route.get("feasible"),
+                "mode": route.get("mode"),
+                "travel_min": round((route.get("total_travel_seconds") or 0) / 60.0, 1),
+                "distance_km": round((route.get("total_distance_meters") or 0) / 1000.0, 2),
+                "dwell_min": route.get("total_dwell_minutes"),
+                "stops": " -> ".join(
+                    stop.get("name", "")
+                    for stop in route.get("stops", [])
+                    if stop.get("kind") == "poi"
+                ),
+                "warnings": len(route.get("feasibility_warnings", [])),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def build_map_dataframe(pois: list[dict], anchor: dict | None) -> pd.DataFrame:
     rows = []
     for poi in pois:
@@ -214,7 +283,7 @@ def build_map_dataframe(pois: list[dict], anchor: dict | None) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_map_chart(pois: list[dict], anchor: dict | None) -> pdk.Deck:
+def build_map_chart(pois: list[dict], anchor: dict | None, route: dict | None = None) -> pdk.Deck:
     poi_rows = [
         {
             "lat": poi["latitude"],
@@ -277,6 +346,23 @@ def build_map_chart(pois: list[dict], anchor: dict | None) -> pdk.Deck:
         view_lat = float(anchor_df["lat"].mean())
         view_lon = float(anchor_df["lon"].mean())
 
+    if route is not None:
+        route_points = []
+        for leg in route.get("legs", []):
+            route_points.extend(leg.get("polyline") or [])
+        if route_points:
+            layers.append(
+                pdk.Layer(
+                    "PathLayer",
+                    data=[{"path": [[point[1], point[0]] for point in route_points]}],
+                    get_path="path",
+                    get_color=[20, 90, 220, 220],
+                    width_min_pixels=4,
+                )
+            )
+            view_lat = float(sum(point[0] for point in route_points) / len(route_points))
+            view_lon = float(sum(point[1] for point in route_points) / len(route_points))
+
     tooltip = {
         "html": "<b>{label}</b>",
         "style": {"backgroundColor": "rgba(30, 30, 30, 0.9)", "color": "white"},
@@ -305,6 +391,14 @@ def main() -> None:
     latest_comments = flatten_comment_bundles(latest_comment_groups)
     latest_summary_groups = load_latest_comment_summaries(cache_dir)
     latest_summaries = flatten_comment_summaries(latest_summary_groups)
+    latest_aggregated_groups = load_latest_aggregated_pois(cache_dir)
+    latest_aggregated_pois = flatten_pois(latest_aggregated_groups)
+    latest_routes = load_latest_routes(cache_dir)
+
+    st.session_state.setdefault("show_intent_clarification", False)
+    st.session_state.setdefault("show_poi_refinement", False)
+    st.session_state.setdefault("resolved_intent_clarifications", set())
+    st.session_state.setdefault("resolved_poi_refinements", set())
 
     with st.sidebar:
         st.header("Run Pipeline")
@@ -315,32 +409,7 @@ def main() -> None:
         )
         default_city = st.text_input("Default city", value=(latest_intent.city or "") if latest_intent else "")
         refresh_intent_cache = st.checkbox("Refresh intent cache", value=False)
-        st.divider()
-        max_pois = st.number_input("Max POIs", min_value=1, max_value=500, value=50, step=1)
-        saved_anchor = (latest_spatial_context or {}).get("anchor") or {}
-        anchor_lat = st.text_input("Anchor latitude", value=str(saved_anchor.get("latitude", "")) if saved_anchor else "")
-        anchor_lng = st.text_input("Anchor longitude", value=str(saved_anchor.get("longitude", "")) if saved_anchor else "")
-        anchor_name = st.text_input("Anchor name", value=saved_anchor.get("name", "Current Location") if saved_anchor else "Current Location")
-        max_radius_km = st.text_input(
-            "Max radius km",
-            value="" if latest_spatial_context is None or latest_spatial_context.get("max_radius_km") is None else str(latest_spatial_context["max_radius_km"]),
-        )
-        max_travel_min = st.text_input(
-            "Max travel min",
-            value="" if latest_spatial_context is None or latest_spatial_context.get("max_travel_min") is None else str(latest_spatial_context["max_travel_min"]),
-        )
-        mode_options = ["walking", "driving", "transit"]
-        saved_mode = (latest_spatial_context or {}).get("mode", "walking")
-        mode = st.selectbox("Mode", mode_options, index=mode_options.index(saved_mode) if saved_mode in mode_options else 0)
-        st.divider()
-        max_reviews_per_poi = st.number_input("Max reviews / POI", min_value=1, max_value=100, value=20, step=1)
-        max_tips_per_poi = st.number_input("Max tips / POI", min_value=1, max_value=100, value=10, step=1)
-        max_summaries_per_event = st.number_input("Max summaries / event", min_value=1, max_value=100, value=10, step=1)
-
         intent_clicked = st.button("Parse Intent", use_container_width=True)
-        poi_clicked = st.button("Load POIs", use_container_width=True)
-        comments_clicked = st.button("Load Comments", use_container_width=True)
-        summarize_comments_clicked = st.button("Summarize Comments", use_container_width=True)
 
     if intent_clicked:
         api_key = env_settings.get("OPENAI_API_KEY")
@@ -361,7 +430,47 @@ def main() -> None:
                 base_url=base_url,
             )
             latest_intent = intent
+            st.session_state["resolved_intent_clarifications"] = set()
+            clarification_plan = build_clarification_plan(latest_intent)
+            st.session_state["show_intent_clarification"] = bool(clarification_plan.questions)
             st.success("Intent parsed and cached.")
+
+    with st.sidebar:
+        st.divider()
+        max_pois = st.number_input("Max POIs", min_value=1, max_value=500, value=50, step=1)
+        saved_anchor = (latest_spatial_context or {}).get("anchor") or {}
+        anchor_lat = st.text_input("Anchor latitude", value=str(saved_anchor.get("latitude", "")) if saved_anchor else "")
+        anchor_lng = st.text_input("Anchor longitude", value=str(saved_anchor.get("longitude", "")) if saved_anchor else "")
+        anchor_name = st.text_input("Anchor name", value=saved_anchor.get("name", "Current Location") if saved_anchor else "Current Location")
+        max_radius_km = st.text_input(
+            "Max radius km",
+            value="" if latest_spatial_context is None or latest_spatial_context.get("max_radius_km") is None else str(latest_spatial_context["max_radius_km"]),
+        )
+        max_travel_min = st.text_input(
+            "Max travel min",
+            value="" if latest_spatial_context is None or latest_spatial_context.get("max_travel_min") is None else str(latest_spatial_context["max_travel_min"]),
+        )
+        mode_options = ["walking", "driving", "cycling"]
+        saved_mode = (latest_spatial_context or {}).get("mode", "walking")
+        mode = st.selectbox("Mode", mode_options, index=mode_options.index(saved_mode) if saved_mode in mode_options else 0)
+        st.divider()
+        max_reviews_per_poi = st.number_input("Max reviews / POI", min_value=1, max_value=100, value=20, step=1)
+        max_tips_per_poi = st.number_input("Max tips / POI", min_value=1, max_value=100, value=10, step=1)
+        max_summaries_per_event = st.number_input("Max summaries / event", min_value=1, max_value=100, value=10, step=1)
+        comment_summary_batch_size = st.number_input("Comment summary batch size", min_value=1, max_value=20, value=7, step=1)
+        comment_summary_parallel_batches = st.number_input("Comment summary parallel batches", min_value=1, max_value=10, value=2, step=1)
+        comment_summary_batch_retries = st.number_input("Comment summary batch retries", min_value=0, max_value=5, value=3, step=1)
+        st.divider()
+        route_max_pois_per_event = st.number_input("Route POIs / event", min_value=1, max_value=10, value=3, step=1)
+        route_max_candidates = st.number_input("Route candidates", min_value=1, max_value=100, value=12, step=1)
+        route_dwell_minutes = st.number_input("Dwell minutes / stop", min_value=0, max_value=240, value=45, step=5)
+        route_require_return = st.checkbox("Return to anchor", value=bool(latest_intent and latest_intent.return_location))
+
+        poi_clicked = st.button("Load POIs", use_container_width=True)
+        comments_clicked = st.button("Load Comments", use_container_width=True)
+        summarize_comments_clicked = st.button("Summarize Comments", use_container_width=True)
+        aggregate_pois_clicked = st.button("Aggregate POIs", use_container_width=True)
+        find_routes_clicked = st.button("Find Routes", use_container_width=True)
 
     if poi_clicked:
         latest_intent = load_latest_intent(cache_dir)
@@ -393,7 +502,114 @@ def main() -> None:
             )
             latest_poi_groups = [group.model_dump() for group in poi_groups]
             latest_pois = flatten_pois(latest_poi_groups)
+            st.session_state["resolved_poi_refinements"] = set()
+            poi_refinement_plan = build_poi_refinement_plan(latest_intent, poi_groups)
+            st.session_state["show_poi_refinement"] = bool(poi_refinement_plan.questions)
             st.success(f"Loaded and cached {len(latest_pois)} POIs across {len(latest_poi_groups)} events.")
+
+    @st.dialog("Intent Clarification")
+    def show_intent_clarification_dialog() -> None:
+        intent = load_latest_intent(cache_dir)
+        if intent is None:
+            st.session_state["show_intent_clarification"] = False
+            st.rerun()
+        plan = build_clarification_plan(intent)
+        resolved = set(st.session_state["resolved_intent_clarifications"])
+        questions = [question for question in plan.questions if question.id not in resolved]
+        if not questions:
+            st.session_state["show_intent_clarification"] = False
+            st.rerun()
+
+        answers: dict[str, str] = {}
+        for question in questions:
+            default_index = question.options.index("do_not_care") if "do_not_care" in question.options else 0
+            answers[question.id] = st.selectbox(
+                question.question,
+                question.options,
+                index=default_index,
+                key=f"intent_dialog_{question.id}",
+            )
+
+        left_button, right_button = st.columns(2)
+        with left_button:
+            if st.button("Apply", use_container_width=True):
+                clarified_intent = apply_clarification_answers(intent, answers, plan=plan)
+                save_latest_intent(cache_dir, clarified_intent)
+                st.session_state["resolved_intent_clarifications"] = resolved.union(question.id for question in questions)
+                st.session_state["show_intent_clarification"] = False
+                st.rerun()
+        with right_button:
+            if st.button("Skip", use_container_width=True):
+                st.session_state["resolved_intent_clarifications"] = resolved.union(question.id for question in questions)
+                st.session_state["show_intent_clarification"] = False
+                st.rerun()
+
+    @st.dialog("POI Refinement")
+    def show_poi_refinement_dialog() -> None:
+        intent = load_latest_intent(cache_dir)
+        current_poi_groups = load_latest_pois(cache_dir)
+        if intent is None or not current_poi_groups:
+            st.session_state["show_poi_refinement"] = False
+            st.rerun()
+        poi_groups_for_refinement = load_poi_groups_json(current_poi_groups)
+        plan = build_poi_refinement_plan(intent, poi_groups_for_refinement)
+        resolved = set(st.session_state["resolved_poi_refinements"])
+        questions = [question for question in plan.questions if question.id not in resolved]
+        if not questions:
+            st.session_state["show_poi_refinement"] = False
+            st.rerun()
+
+        answers: dict[str, str] = {}
+        for question in questions:
+            default_index = question.options.index("do_not_care") if "do_not_care" in question.options else 0
+            answers[question.id] = st.selectbox(
+                question.question,
+                question.options,
+                index=default_index,
+                key=f"poi_dialog_{question.id}",
+            )
+
+        left_button, right_button = st.columns(2)
+        with left_button:
+            if st.button("Apply and Reload", use_container_width=True):
+                refined_intent = apply_clarification_answers(intent, answers, plan=plan)
+                save_latest_intent(cache_dir, refined_intent)
+                business_file = resolve_business_file(refined_intent)
+                spatial_constraint = build_spatial_constraint(
+                    anchor_lat=anchor_lat,
+                    anchor_lng=anchor_lng,
+                    anchor_name=anchor_name,
+                    max_radius_km=max_radius_km,
+                    max_travel_min=max_travel_min,
+                    mode=mode,
+                )
+                refined_poi_groups = load_candidate_poi_groups(
+                    refined_intent,
+                    business_file=business_file,
+                    max_pois=int(max_pois),
+                    spatial_constraint=spatial_constraint,
+                )
+                save_latest_spatial_context(cache_dir, spatial_constraint)
+                save_cached_pois(
+                    refined_poi_groups,
+                    cache_dir=cache_dir,
+                    intent=refined_intent,
+                    business_file=business_file,
+                    max_pois=int(max_pois),
+                )
+                st.session_state["resolved_poi_refinements"] = resolved.union(question.id for question in questions)
+                st.session_state["show_poi_refinement"] = False
+                st.rerun()
+        with right_button:
+            if st.button("Skip", use_container_width=True):
+                st.session_state["resolved_poi_refinements"] = resolved.union(question.id for question in questions)
+                st.session_state["show_poi_refinement"] = False
+                st.rerun()
+
+    if st.session_state["show_intent_clarification"]:
+        show_intent_clarification_dialog()
+    elif st.session_state["show_poi_refinement"]:
+        show_poi_refinement_dialog()
 
     if comments_clicked:
         if not latest_poi_groups:
@@ -460,6 +676,9 @@ def main() -> None:
                         comment_groups,
                         llm_client=client,
                         max_bundles_per_event=int(max_summaries_per_event),
+                        batch_size=int(comment_summary_batch_size),
+                        max_parallel_batches=int(comment_summary_parallel_batches),
+                        batch_retries=int(comment_summary_batch_retries),
                         progress_callback=on_progress,
                     )
                     progress_bar.progress(1.0, text=f"Summarized {planned_count}/{planned_count} POIs")
@@ -474,6 +693,87 @@ def main() -> None:
                     latest_summary_groups = [group.model_dump() for group in summary_groups]
                     latest_summaries = flatten_comment_summaries(latest_summary_groups)
                     st.success(f"Summarized comments for {len(latest_summaries)} POIs across {len(latest_summary_groups)} events.")
+
+    if aggregate_pois_clicked:
+        if not latest_poi_groups:
+            latest_poi_groups = load_latest_pois(cache_dir)
+            latest_pois = flatten_pois(latest_poi_groups)
+        if not latest_summary_groups:
+            latest_summary_groups = load_latest_comment_summaries(cache_dir)
+            latest_summaries = flatten_comment_summaries(latest_summary_groups)
+        if not latest_poi_groups:
+            st.error("No cached POIs found. Load POIs first.")
+        elif not latest_summary_groups:
+            st.error("No cached comment summaries found. Summarize comments first.")
+        else:
+            poi_groups = load_poi_groups_json(latest_poi_groups)
+            summary_groups = [EventCommentSummaryGroup.model_validate(item) for item in latest_summary_groups]
+            aggregated_groups = aggregate_event_poi_groups(poi_groups, summary_groups)
+            save_cached_aggregated_pois(
+                aggregated_groups,
+                cache_dir=cache_dir,
+                poi_groups=poi_groups,
+                summary_groups=summary_groups,
+            )
+            latest_aggregated_groups = [group.model_dump() for group in aggregated_groups]
+            latest_aggregated_pois = flatten_pois(latest_aggregated_groups)
+            st.success(
+                f"Aggregated {len(latest_aggregated_pois)} POI cards across {len(latest_aggregated_groups)} events."
+            )
+
+    if find_routes_clicked:
+        ors_key = env_settings.get("OPENROUTESERVICE_API_KEY") or env_settings.get("ORS_API_KEY")
+        latest_intent = load_latest_intent(cache_dir)
+        if latest_intent is None:
+            st.error("No cached intent found. Parse intent first.")
+        elif not ors_key:
+            st.error("Missing OPENROUTESERVICE_API_KEY in .env.local.")
+        else:
+            if not latest_aggregated_groups:
+                latest_aggregated_groups = load_latest_aggregated_pois(cache_dir)
+                latest_aggregated_pois = flatten_pois(latest_aggregated_groups)
+            if not latest_aggregated_groups:
+                st.error("No aggregated POI cards found. Aggregate POIs first.")
+            else:
+                route_anchor = None
+                if anchor_lat and anchor_lng:
+                    route_anchor = AnchorPoint(
+                        name=anchor_name or "Current Location",
+                        latitude=float(anchor_lat),
+                        longitude=float(anchor_lng),
+                    )
+                elif latest_spatial_context and latest_spatial_context.get("anchor"):
+                    route_anchor = AnchorPoint.model_validate(latest_spatial_context["anchor"])
+                aggregated_groups = [EventAggregatedPOIGroup.model_validate(item) for item in latest_aggregated_groups]
+                ors_client = OpenRouteServiceDirectionClient(
+                    api_key=ors_key,
+                    timeout=float(env_settings.get("ORS_TIMEOUT_SEC", "20")),
+                )
+                routes = find_route_candidates(
+                    intent=latest_intent,
+                    aggregated_groups=aggregated_groups,
+                    direction_client=ors_client,
+                    mode=mode,
+                    anchor=route_anchor,
+                    max_pois_per_event=int(route_max_pois_per_event),
+                    max_candidates=int(route_max_candidates),
+                    dwell_minutes_per_event=float(route_dwell_minutes),
+                    require_return=bool(route_require_return),
+                )
+                save_cached_routes(
+                    routes,
+                    cache_dir=cache_dir,
+                    intent=latest_intent,
+                    aggregated_groups=aggregated_groups,
+                    mode=mode,
+                    anchor=route_anchor,
+                    max_pois_per_event=int(route_max_pois_per_event),
+                    max_candidates=int(route_max_candidates),
+                    dwell_minutes_per_event=float(route_dwell_minutes),
+                    require_return=bool(route_require_return),
+                )
+                latest_routes = [route.model_dump() for route in routes]
+                st.success(f"Found and cached {len(latest_routes)} route candidates.")
 
     left, right = st.columns([1, 2])
 
@@ -511,6 +811,35 @@ def main() -> None:
     else:
         st.info("No cached comment summaries yet.")
 
+    st.subheader("Aggregated POI Cards")
+    if latest_aggregated_pois:
+        aggregated_df = build_aggregated_poi_table(latest_aggregated_pois)
+        aggregated_df = aggregated_df.sort_values(
+            by=["event", "aggregate_score"],
+            ascending=[True, False],
+            kind="stable",
+        )
+        st.dataframe(aggregated_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No aggregated POI cards yet.")
+
+    selected_route = None
+    st.subheader("Route Candidates")
+    if latest_routes:
+        route_df = build_route_table(latest_routes)
+        st.dataframe(route_df, use_container_width=True, hide_index=True)
+        route_labels = [
+            f'#{index} | score={route.get("score", 0)} | {round((route.get("total_travel_seconds") or 0) / 60.0, 1)} min'
+            for index, route in enumerate(latest_routes, start=1)
+        ]
+        selected_route_label = st.selectbox("Select Route", route_labels)
+        selected_route = latest_routes[route_labels.index(selected_route_label)]
+        if selected_route.get("feasibility_warnings"):
+            st.warning("\n".join(selected_route["feasibility_warnings"]))
+        st.caption(selected_route.get("explanation", ""))
+    else:
+        st.info("No route candidates yet.")
+
     st.subheader("Map")
     if latest_pois:
         anchor = None
@@ -522,7 +851,7 @@ def main() -> None:
             }
         elif latest_spatial_context and latest_spatial_context.get("anchor"):
             anchor = latest_spatial_context["anchor"]
-        map_chart = build_map_chart(latest_pois, anchor)
+        map_chart = build_map_chart(latest_pois, anchor, selected_route)
         st.pydeck_chart(map_chart, use_container_width=True)
     else:
         st.info("Run POI loading to render the map.")
@@ -572,6 +901,32 @@ def main() -> None:
         st.json(selected_summary)
     else:
         st.info("No comment summary details available yet.")
+
+    st.subheader("Aggregated POI Detail")
+    if latest_aggregated_pois:
+        aggregated_labels = [
+            f'{poi.get("event_name") or poi.get("event_goal")} | {poi["name"]} | score={poi.get("aggregate_score", 0)}'
+            for poi in latest_aggregated_pois
+        ]
+        selected_aggregated_label = st.selectbox("Select Aggregated POI", aggregated_labels)
+        selected_aggregated = latest_aggregated_pois[aggregated_labels.index(selected_aggregated_label)]
+        st.metric("Aggregate Score", selected_aggregated.get("aggregate_score", 0.0))
+        aggregate_breakdown = selected_aggregated.get("aggregate_breakdown") or {}
+        if aggregate_breakdown:
+            aggregate_breakdown_df = pd.DataFrame(
+                [{"component": component, "delta": delta} for component, delta in aggregate_breakdown.items()]
+            ).sort_values(by="delta", ascending=False, kind="stable")
+            st.caption("Aggregate Score Breakdown")
+            st.dataframe(aggregate_breakdown_df, use_container_width=True, hide_index=True)
+        st.json(selected_aggregated)
+    else:
+        st.info("No aggregated POI details available yet.")
+
+    st.subheader("Route Detail")
+    if selected_route is not None:
+        st.json(selected_route)
+    else:
+        st.info("No route detail available yet.")
 
 
 def build_spatial_constraint(

@@ -86,6 +86,7 @@ class CitySubsetAccumulator:
 
 BudgetLevel = Literal["low", "medium", "high", "unknown"]
 IntentParseMethod = Literal["llm"]
+ClarificationField = Literal["budget_level", "cuisine_category"]
 
 
 def _unique_strings(values: list[str]) -> list[str]:
@@ -243,6 +244,18 @@ class Intent(BaseModel):
         return "unknown"
 
 
+class ClarificationQuestion(BaseModel):
+    id: str
+    event_index: int
+    field: ClarificationField
+    question: str
+    options: list[str] = Field(default_factory=list)
+
+
+class ClarificationPlan(BaseModel):
+    questions: list[ClarificationQuestion] = Field(default_factory=list)
+
+
 class RawPOI(BaseModel):
     business_id: str
     name: str
@@ -333,6 +346,48 @@ class EventCommentSummaryGroup(BaseModel):
     summaries: list[POICommentSummary] = Field(default_factory=list)
 
 
+class AggregatedPOI(BaseModel):
+    business_id: str
+    name: str
+    address: str = ""
+    city: str
+    state: str
+    postal_code: str = ""
+    latitude: float
+    longitude: float
+    stars: float
+    review_count: int
+    is_open: bool
+    categories: list[str] = Field(default_factory=list)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    hours: dict[str, str] = Field(default_factory=dict)
+    price_tier: Optional[int] = None
+    price_level: Optional[str] = None
+    distance_to_anchor_km: Optional[float] = None
+    estimated_travel_minutes: Optional[float] = None
+    retrieval_score: float = 0.0
+    retrieval_reasons: list[str] = Field(default_factory=list)
+    retrieval_breakdown: dict[str, float] = Field(default_factory=dict)
+    retrieval_trace: list[dict[str, Any]] = Field(default_factory=list)
+    comment_summary_available: bool = False
+    comment_summary: Optional[str] = None
+    comment_keywords: list[str] = Field(default_factory=list)
+    comment_pros: list[str] = Field(default_factory=list)
+    comment_cons: list[str] = Field(default_factory=list)
+    comment_notable_risks: list[str] = Field(default_factory=list)
+    comment_evidence: list[str] = Field(default_factory=list)
+    comment_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    aggregate_score: float = 0.0
+    aggregate_breakdown: dict[str, float] = Field(default_factory=dict)
+
+
+class EventAggregatedPOIGroup(BaseModel):
+    event_index: int
+    event_name: str
+    event_goal: str
+    pois: list[AggregatedPOI] = Field(default_factory=list)
+
+
 class GeoPoint(BaseModel):
     latitude: float
     longitude: float
@@ -348,4 +403,49 @@ class SpatialConstraint(BaseModel):
     anchor: AnchorPoint
     max_radius_km: Optional[float] = None
     max_travel_min: Optional[float] = None
-    mode: Literal["walking", "driving", "transit"] = "walking"
+    mode: Literal["walking", "driving", "cycling"] = "walking"
+
+
+RouteTravelMode = Literal["walking", "driving", "cycling"]
+RouteStopKind = Literal["anchor", "poi"]
+
+
+class RouteStop(BaseModel):
+    kind: RouteStopKind
+    name: str
+    latitude: float
+    longitude: float
+    business_id: Optional[str] = None
+    event_index: Optional[int] = None
+    event_name: Optional[str] = None
+    dwell_minutes: float = 0.0
+    aggregate_score: float = 0.0
+
+
+class RouteLeg(BaseModel):
+    origin_name: str
+    destination_name: str
+    mode: RouteTravelMode
+    distance_meters: Optional[float] = None
+    duration_seconds: Optional[float] = None
+    polyline: list[list[float]] = Field(default_factory=list)
+    provider: str = "openrouteservice"
+    provider_status: str = "unknown"
+    provider_info: Optional[str] = None
+    provider_infocode: Optional[str] = None
+    raw_path_count: int = 0
+
+
+class RouteCandidate(BaseModel):
+    route_id: str
+    mode: RouteTravelMode
+    stops: list[RouteStop] = Field(default_factory=list)
+    legs: list[RouteLeg] = Field(default_factory=list)
+    total_distance_meters: float = 0.0
+    total_travel_seconds: float = 0.0
+    total_dwell_minutes: float = 0.0
+    total_poi_score: float = 0.0
+    score: float = 0.0
+    feasible: bool = True
+    feasibility_warnings: list[str] = Field(default_factory=list)
+    explanation: str = ""

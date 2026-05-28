@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urlencode
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -32,23 +33,30 @@ class OpenRouteServiceDirectionClient:
             return []
 
         profile = ORS_PROFILES[mode]
-        payload = {
-            "coordinates": [[stop.longitude, stop.latitude] for stop in stops],
-            "instructions": False,
-        }
-        response = self._request(profile, payload)
-        return parse_ors_route(response, stops=stops, mode=mode)
+        legs: list[RouteLeg] = []
+        for origin, destination in zip(stops, stops[1:]):
+            response = self._request(
+                profile=profile,
+                origin=origin,
+                destination=destination,
+            )
+            legs.extend(parse_ors_route(response, stops=[origin, destination], mode=mode))
+        return legs
 
-    def _request(self, profile: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _request(self, *, profile: str, origin: RouteStop, destination: RouteStop) -> dict[str, Any]:
+        query = urlencode(
+            {
+                "api_key": self.api_key,
+                "start": _format_coordinate(origin),
+                "end": _format_coordinate(destination),
+            }
+        )
         request = Request(
-            f"{ORS_BASE_URL}/{profile}/geojson",
-            data=json.dumps(payload).encode("utf-8"),
+            f"{ORS_BASE_URL}/{profile}?{query}",
             headers={
-                "Authorization": self.api_key,
-                "Content-Type": "application/json",
-                "Accept": "application/json, application/geo+json",
+                "Accept": "application/geo+json, application/json",
             },
-            method="POST",
+            method="GET",
         )
         try:
             with urlopen(request, timeout=self.timeout) as response:
@@ -116,6 +124,10 @@ def _parse_geojson_coordinates(coordinates: list[Any]) -> list[list[float]]:
             continue
         points.append([latitude, longitude])
     return points
+
+
+def _format_coordinate(stop: RouteStop) -> str:
+    return f"{stop.longitude:.8f},{stop.latitude:.8f}"
 
 
 def _to_float(value: Any) -> float | None:

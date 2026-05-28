@@ -284,6 +284,23 @@ def build_map_dataframe(pois: list[dict], anchor: dict | None) -> pd.DataFrame:
 
 
 def build_map_chart(pois: list[dict], anchor: dict | None, route: dict | None = None) -> pdk.Deck:
+    route_points = []
+    route_stops = []
+    if route is not None:
+        for leg in route.get("legs", []):
+            route_points.extend(leg.get("polyline") or [])
+        for index, stop in enumerate(route.get("stops", []), start=1):
+            route_stops.append(
+                {
+                    "lat": stop["latitude"],
+                    "lon": stop["longitude"],
+                    "label": f"{index}. {stop['name']}",
+                    "kind": stop.get("kind", "stop"),
+                    "sequence": index,
+                    "color": [0, 123, 255, 230] if stop.get("kind") == "anchor" else [255, 193, 7, 230],
+                }
+            )
+
     poi_rows = [
         {
             "lat": poi["latitude"],
@@ -295,6 +312,22 @@ def build_map_chart(pois: list[dict], anchor: dict | None, route: dict | None = 
     poi_df = pd.DataFrame(poi_rows)
 
     layers: list[pdk.Layer] = [
+        pdk.Layer(
+            "TileLayer",
+            data="https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            min_zoom=0,
+            max_zoom=19,
+            tile_size=256,
+            render_sub_layers={
+                "@@type": "BitmapLayer",
+                "data": None,
+                "image": "{data}",
+                "bounds": [
+                    ["{bbox.west}", "{bbox.south}"],
+                    ["{bbox.east}", "{bbox.north}"],
+                ],
+            },
+        ),
         pdk.Layer(
             "ScatterplotLayer",
             data=poi_df,
@@ -346,22 +379,46 @@ def build_map_chart(pois: list[dict], anchor: dict | None, route: dict | None = 
         view_lat = float(anchor_df["lat"].mean())
         view_lon = float(anchor_df["lon"].mean())
 
-    if route is not None:
-        route_points = []
-        for leg in route.get("legs", []):
-            route_points.extend(leg.get("polyline") or [])
-        if route_points:
-            layers.append(
-                pdk.Layer(
-                    "PathLayer",
-                    data=[{"path": [[point[1], point[0]] for point in route_points]}],
-                    get_path="path",
-                    get_color=[20, 90, 220, 220],
-                    width_min_pixels=4,
-                )
+    if route_points:
+        layers.append(
+            pdk.Layer(
+                "PathLayer",
+                data=[{"path": [[point[1], point[0]] for point in route_points], "label": "Selected route"}],
+                get_path="path",
+                get_color=[20, 90, 220, 230],
+                width_min_pixels=5,
             )
-            view_lat = float(sum(point[0] for point in route_points) / len(route_points))
-            view_lon = float(sum(point[1] for point in route_points) / len(route_points))
+        )
+        view_lat = float(sum(point[0] for point in route_points) / len(route_points))
+        view_lon = float(sum(point[1] for point in route_points) / len(route_points))
+
+    if route_stops:
+        route_stop_df = pd.DataFrame(route_stops)
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=route_stop_df,
+                get_position="[lon, lat]",
+                get_fill_color="color",
+                get_line_color=[24, 24, 24, 255],
+                line_width_min_pixels=2,
+                stroked=True,
+                get_radius=130,
+                pickable=True,
+            )
+        )
+        layers.append(
+            pdk.Layer(
+                "TextLayer",
+                data=route_stop_df,
+                get_position="[lon, lat]",
+                get_text="label",
+                get_color=[24, 24, 24, 255],
+                get_size=13,
+                get_alignment_baseline="'bottom'",
+                get_pixel_offset=[0, -14],
+            )
+        )
 
     tooltip = {
         "html": "<b>{label}</b>",

@@ -48,6 +48,8 @@ Rules:
 - Example: `good restaurant` implies not just `Restaurants`, but also a quality-oriented event soft preference such as `high_quality_food`.
 - When a query contains multiple stops, split them into multiple events.
 - When different stops imply different budgets or preferences, keep those differences at the event level.
+- If the query contains later correction text such as `用户补充修改`, `修改`, `改成`, or `change to`, the latest correction overrides earlier wording for the affected events.
+- If a later correction says the budget changed, apply that budget_level to every event whose budget is not separately constrained by a more specific event-level budget.
 - The top-level overall_goal should summarize the whole plan, not just one event.
 
 Allowed goals:
@@ -100,6 +102,7 @@ Return only a JSON object with these fields:
 - confidence: number from 0 to 1
 
 Rules:
+- Output summary, keywords, pros, cons, notable_risks, and evidence in natural Simplified Chinese. Do not output English unless it is a proper noun such as a place name.
 - Focus on the user's overall query and the current event, not generic sentiment.
 - Use only the provided comments and tips as evidence.
 - Allow mixed evidence. The same aspect may appear in both pros and cons if comments conflict.
@@ -132,6 +135,7 @@ Return only a JSON object with this shape:
 Rules:
 - Return exactly one summary item for each input POI.
 - Preserve every input business_id exactly.
+- Output summary, keywords, pros, cons, notable_risks, and evidence in natural Simplified Chinese. Do not output English unless it is a proper noun such as a place name.
 - Focus on the user's overall query and the current event, not generic sentiment.
 - Use only the provided comments and tips as evidence.
 - Allow mixed evidence. The same aspect may appear in both pros and cons if comments conflict.

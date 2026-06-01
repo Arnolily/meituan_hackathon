@@ -75,3 +75,29 @@ def save_cached_comments(
     latest_path = cache_dir / "comments" / "latest_comments.json"
     latest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return cache_path
+
+
+def load_cached_comments(
+    *,
+    cache_dir: Path,
+    poi_groups: Sequence[EventPOIGroup],
+    review_file: Path,
+    tip_file: Path,
+    max_reviews_per_poi: int,
+    max_tips_per_poi: int,
+) -> list[EventCommentGroup] | None:
+    cache_path = get_comment_cache_path(
+        cache_dir=cache_dir,
+        poi_groups=poi_groups,
+        review_file=review_file,
+        tip_file=tip_file,
+        max_reviews_per_poi=max_reviews_per_poi,
+        max_tips_per_poi=max_tips_per_poi,
+    )
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        return [EventCommentGroup.model_validate(item) for item in payload]
+    except Exception:
+        return None

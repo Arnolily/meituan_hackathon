@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 from time import perf_counter
 from typing import Any, Callable, Optional, Protocol
 
@@ -16,6 +17,46 @@ from planner.schemas import EventCommentGroup, EventCommentSummaryGroup, Intent,
 class JSONLLMClient(Protocol):
     def generate_json(self, *, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> dict[str, Any]:
         ...
+
+
+GOAL_KEYWORDS: dict[str, list[str]] = {
+    "breakfast": ["breakfast", "brunch", "coffee", "早饭", "早餐", "早午餐"],
+    "lunch": ["lunch", "food", "restaurant", "meal", "taco", "sandwich", "午餐", "吃饭", "餐厅"],
+    "dinner": ["dinner", "food", "restaurant", "meal", "reservation", "service", "晚餐", "吃饭", "餐厅"],
+    "coffee": ["coffee", "cafe", "latte", "espresso", "pastry", "咖啡", "咖啡馆"],
+    "dessert": ["dessert", "ice cream", "bakery", "cake", "甜品", "冰淇淋", "烘焙"],
+    "drinks": ["drink", "bar", "cocktail", "beer", "wine", "酒吧", "饮品"],
+    "nightlife": ["bar", "cocktail", "music", "night", "夜生活", "酒吧"],
+    "shopping": ["shopping", "store", "mall", "boutique", "购物", "商场"],
+    "sightseeing": ["sightseeing", "view", "historic", "walk", "观光", "景点"],
+    "museum": ["museum", "exhibit", "collection", "gallery", "art", "博物馆", "展览", "艺术"],
+    "park": ["park", "outdoor", "green", "walk", "garden", "trail", "公园", "户外", "散步"],
+    "historical_site": ["historic", "history", "landmark", "tour", "历史", "地标"],
+    "art_gallery": ["art", "gallery", "exhibit", "艺术", "画廊", "展览"],
+    "performance": ["performance", "show", "theater", "music", "演出", "剧场"],
+    "games": ["game", "arcade", "fun", "activity", "游戏", "娱乐"],
+}
+
+CATEGORY_KEYWORDS: dict[str, list[str]] = {
+    "Chinese": ["chinese", "noodle", "dumpling", "中餐", "面", "饺子"],
+    "Japanese": ["japanese", "sushi", "ramen", "日料", "寿司", "拉面"],
+    "Italian": ["italian", "pasta", "pizza", "意餐", "披萨"],
+    "Mexican": ["mexican", "taco", "burrito", "墨西哥", "塔可"],
+    "Seafood": ["seafood", "fish", "oyster", "海鲜"],
+    "Restaurants": ["restaurant", "food", "meal", "service", "餐厅", "吃饭"],
+    "Food": ["food", "meal", "snack", "吃饭", "餐饮"],
+    "Breakfast & Brunch": ["breakfast", "brunch", "pancake", "早午餐"],
+    "Coffee & Tea": ["coffee", "tea", "latte", "咖啡", "茶"],
+    "Cafes": ["cafe", "coffee", "pastry", "咖啡馆"],
+    "Museums": ["museum", "exhibit", "collection", "博物馆"],
+    "Art Museums": ["art", "museum", "painting", "艺术博物馆"],
+    "Art Galleries": ["gallery", "art", "exhibit", "画廊"],
+    "Parks": ["park", "green", "outdoor", "公园"],
+    "Active Life": ["outdoor", "activity", "walk", "户外"],
+    "Shopping Centers": ["shopping", "mall", "store", "购物中心"],
+    "Arts & Entertainment": ["art", "entertainment", "show", "文化娱乐"],
+    "Bars": ["bar", "beer", "cocktail", "酒吧"],
+}
 
 
 def summarize_event_comment_groups(
@@ -106,6 +147,7 @@ def summarize_poi_comment_batch(
 ) -> list[POICommentSummary]:
     if not bundles:
         return []
+    keywords = _keywords_for_event(intent, event_index)
     if len(bundles) == 1:
         return [
             summarize_poi_comment_bundle(
@@ -116,6 +158,7 @@ def summarize_poi_comment_batch(
                 max_reviews=max_reviews,
                 max_tips=max_tips,
                 max_chars_per_item=max_chars_per_item,
+                keywords=keywords,
             )
         ]
 
@@ -129,8 +172,8 @@ def summarize_poi_comment_batch(
                 "business_id": bundle.business_id,
                 "name": bundle.name,
                 "city": bundle.city,
-                "reviews": _pack_reviews(bundle, max_reviews=max_reviews, max_chars_per_item=max_chars_per_item),
-                "tips": _pack_tips(bundle, max_tips=max_tips, max_chars_per_item=max_chars_per_item),
+                "reviews": _pack_reviews(bundle, max_reviews=max_reviews, max_chars_per_item=max_chars_per_item, keywords=keywords),
+                "tips": _pack_tips(bundle, max_tips=max_tips, max_chars_per_item=max_chars_per_item, keywords=keywords),
             }
             for bundle in bundles
         ],
@@ -162,10 +205,12 @@ def summarize_poi_comment_bundle(
     max_reviews: int = 8,
     max_tips: int = 6,
     max_chars_per_item: int = 280,
+    keywords: Optional[list[str]] = None,
 ) -> POICommentSummary:
     event = intent.events[event_index - 1]
-    packed_reviews = _pack_reviews(bundle, max_reviews=max_reviews, max_chars_per_item=max_chars_per_item)
-    packed_tips = _pack_tips(bundle, max_tips=max_tips, max_chars_per_item=max_chars_per_item)
+    event_keywords = keywords or _keywords_for_event(intent, event_index)
+    packed_reviews = _pack_reviews(bundle, max_reviews=max_reviews, max_chars_per_item=max_chars_per_item, keywords=event_keywords)
+    packed_tips = _pack_tips(bundle, max_tips=max_tips, max_chars_per_item=max_chars_per_item, keywords=event_keywords)
     started_at = perf_counter()
     payload = llm_client.generate_json(
         system_prompt=COMMENT_SUMMARIZER_SYSTEM_PROMPT,
@@ -249,17 +294,99 @@ def _chunked(items: list[POICommentBundle], *, batch_size: int) -> list[list[POI
     return [items[index : index + batch_size] for index in range(0, len(items), batch_size)]
 
 
-def _pack_reviews(bundle: POICommentBundle, *, max_reviews: int, max_chars_per_item: int) -> list[str]:
+def _keywords_for_event(intent: Intent, event_index: int) -> list[str]:
+    event = intent.events[event_index - 1]
+    tokens: list[str] = []
+    for source in [
+        intent.raw_query,
+        intent.overall_goal,
+        event.name or "",
+        event.goal,
+        " ".join(event.categories),
+        " ".join(event.poi_types),
+        " ".join(event.hard_constraints),
+        " ".join(event.soft_preferences),
+    ]:
+        tokens.extend(_extract_keywords(source))
+    tokens.extend(GOAL_KEYWORDS.get(event.goal, []))
+    for category in event.categories:
+        tokens.extend(CATEGORY_KEYWORDS.get(category, []))
+        tokens.extend(_extract_keywords(category))
+    for poi_type in event.poi_types:
+        tokens.extend(_extract_keywords(poi_type.replace("_", " ")))
+    return _dedupe_keywords(tokens)
+
+
+def _extract_keywords(text: str) -> list[str]:
+    if not text:
+        return []
+    lowered = text.lower()
+    ascii_tokens = re.findall(r"[a-z0-9][a-z0-9'& -]{1,40}", lowered)
+    cjk_tokens = re.findall(r"[\u4e00-\u9fff]{2,}", text)
+    tokens: list[str] = []
+    for token in ascii_tokens:
+        cleaned = " ".join(token.replace("&", " ").split())
+        if len(cleaned) >= 3:
+            tokens.append(cleaned)
+            tokens.extend(part for part in cleaned.split() if len(part) >= 3)
+    tokens.extend(cjk_tokens)
+    return tokens
+
+
+def _dedupe_keywords(tokens: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for token in tokens:
+        cleaned = token.strip().lower()
+        if len(cleaned) < 2 or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
+def _score_text_for_keywords(text: str, keywords: list[str]) -> int:
+    lowered = text.lower()
+    return sum(1 for keyword in keywords if keyword and keyword in lowered)
+
+
+def _select_reviews(bundle: POICommentBundle, *, max_reviews: int, keywords: list[str]) -> list[Any]:
+    if max_reviews <= 0:
+        return []
+    scored = [
+        (_score_text_for_keywords(review.text, keywords), review.useful, review.date, index, review)
+        for index, review in enumerate(bundle.reviews)
+    ]
+    matched = [item for item in scored if item[0] > 0]
+    if matched:
+        return [item[-1] for item in sorted(matched, key=lambda item: (-item[0], -item[1], item[3]))[:max_reviews]]
+    return bundle.reviews[:max_reviews]
+
+
+def _select_tips(bundle: POICommentBundle, *, max_tips: int, keywords: list[str]) -> list[Any]:
+    if max_tips <= 0:
+        return []
+    scored = [
+        (_score_text_for_keywords(tip.text, keywords), tip.compliment_count, tip.date, index, tip)
+        for index, tip in enumerate(bundle.tips)
+    ]
+    matched = [item for item in scored if item[0] > 0]
+    if matched:
+        return [item[-1] for item in sorted(matched, key=lambda item: (-item[0], -item[1], item[3]))[:max_tips]]
+    return bundle.tips[:max_tips]
+
+
+def _pack_reviews(bundle: POICommentBundle, *, max_reviews: int, max_chars_per_item: int, keywords: Optional[list[str]] = None) -> list[str]:
     packed: list[str] = []
-    for review in bundle.reviews[:max_reviews]:
+    for review in _select_reviews(bundle, max_reviews=max_reviews, keywords=keywords or []):
         text = _truncate(review.text, max_chars=max_chars_per_item)
         packed.append(f"stars={review.stars}; useful={review.useful}; date={review.date}; text={text}")
     return packed
 
 
-def _pack_tips(bundle: POICommentBundle, *, max_tips: int, max_chars_per_item: int) -> list[str]:
+def _pack_tips(bundle: POICommentBundle, *, max_tips: int, max_chars_per_item: int, keywords: Optional[list[str]] = None) -> list[str]:
     packed: list[str] = []
-    for tip in bundle.tips[:max_tips]:
+    for tip in _select_tips(bundle, max_tips=max_tips, keywords=keywords or []):
         text = _truncate(tip.text, max_chars=max_chars_per_item)
         packed.append(f"compliments={tip.compliment_count}; date={tip.date}; text={text}")
     return packed

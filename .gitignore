@@ -2,8 +2,8 @@
 /.pytest_cache
 /.vscode
 /yelp_dataset
-/cache
 *pycache*
-*data*
 *tests*
 /meituan_map
+*cache*
+*data*

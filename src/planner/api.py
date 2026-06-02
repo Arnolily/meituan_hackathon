@@ -289,6 +289,15 @@ def _apply_direct_intent_overrides(query: str, intent: Intent) -> Intent:
 
 def _llm_config(payload: dict[str, Any], env_settings: dict[str, str]) -> tuple[str | None, str | None, str | None]:
     model_choice = payload.get("modelChoice")
+    return _llm_config_for_choice(model_choice, env_settings)
+
+
+def _comment_llm_config(payload: dict[str, Any], env_settings: dict[str, str]) -> tuple[str | None, str | None, str | None]:
+    model_choice = payload.get("commentModelChoice") or payload.get("modelChoice")
+    return _llm_config_for_choice(model_choice, env_settings)
+
+
+def _llm_config_for_choice(model_choice: Any, env_settings: dict[str, str]) -> tuple[str | None, str | None, str | None]:
     if model_choice == "deepseek":
         api_key = _env_value(env_settings, "DEEPSEEK_API_KEY") or _env_value(env_settings, "VITE_DEEPSEEK_API_KEY")
         base_url = _env_value(env_settings, "DEEPSEEK_BASE_URL") or _env_value(env_settings, "VITE_DEEPSEEK_BASE_URL")
@@ -455,7 +464,12 @@ def _price(poi: dict[str, Any]) -> int:
     return 0
 
 
-def _load_cached_comment_summaries(poi_groups: list[Any], cache_dir: Any = DEFAULT_CACHE_DIR) -> list[EventCommentSummaryGroup]:
+def _load_cached_comment_summaries(
+    poi_groups: list[Any],
+    cache_dir: Any = DEFAULT_CACHE_DIR,
+    *,
+    allow_local_fallback: bool = True,
+) -> list[EventCommentSummaryGroup]:
     latest_path = cache_dir / "comment_summaries" / "latest_comment_summaries.json"
     if not latest_path.exists():
         return []
@@ -476,7 +490,11 @@ def _load_cached_comment_summaries(poi_groups: list[Any], cache_dir: Any = DEFAU
         summaries = [
             summary
             for summary in group.summaries
-            if summary.business_id in wanted_ids and _summary_is_display_chinese(summary.model_dump())
+            if (
+                summary.business_id in wanted_ids
+                and _summary_is_display_chinese(summary.model_dump())
+                and (allow_local_fallback or not _summary_is_local_fallback(summary.model_dump()))
+            )
         ]
         if summaries:
             filtered_groups.append(group.model_copy(update={"summaries": summaries}))
@@ -531,19 +549,27 @@ def _summary_coverage(
 
 
 RISK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\b(wait|line|queue|crowd|busy|packed|reservation|book)\b", re.I), "热门时段可能需要排队或提前预约。"),
-    (re.compile(r"\b(slow|rude|service|staff|server|host)\b", re.I), "部分评论提到服务速度或服务体验不稳定。"),
-    (re.compile(r"\b(expensive|price|overpriced|value|worth|cost)\b", re.I), "部分评论认为价格或性价比需要留意。"),
-    (re.compile(r"\b(parking|park)\b", re.I), "停车可能不太方便。"),
-    (re.compile(r"\b(noisy|noise|loud)\b", re.I), "环境可能偏吵。"),
-    (re.compile(r"\b(closed|hours|open)\b", re.I), "营业时间需要出发前再确认。"),
+    (re.compile(r"\b(long wait|waited|waiting|line|queue)\b", re.I), "可能需要排队或等待"),
+    (re.compile(r"\b(packed|crowded|busy|reservation|book)\b", re.I), "热门时段建议提前预约或避开高峰"),
+    (re.compile(r"\b(slow service|slow|took forever|server|host)\b", re.I), "服务速度可能不稳定"),
+    (re.compile(r"\b(rude|attitude|ignored|bad service)\b", re.I), "少数评论对服务态度不满意"),
+    (re.compile(r"\b(expensive|overpriced|pricey|cost|not worth)\b", re.I), "价格或性价比需要留意"),
+    (re.compile(r"\b(parking|garage|street parking)\b", re.I), "停车可能不太方便"),
+    (re.compile(r"\b(noisy|noise|loud)\b", re.I), "环境可能偏吵"),
+    (re.compile(r"\b(closed|hours|open late|open)\b", re.I), "营业时间需要出发前再确认"),
 )
 
 PRO_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\b(food|dish|menu|delicious|tasty|flavor|fresh|portion)\b", re.I), "不少评论认可出品和口味。"),
-    (re.compile(r"\b(friendly|service|staff|server|helpful)\b", re.I), "有评论提到服务态度不错。"),
-    (re.compile(r"\b(atmosphere|vibe|ambiance|interior|space)\b", re.I), "环境氛围是评论里的正面点。"),
-    (re.compile(r"\b(location|view|walk|convenient|near)\b", re.I), "位置和周边体验比较方便。"),
+    (re.compile(r"\b(sushi|sashimi|roll|omakase)\b", re.I), "寿司、刺身或 omakase 口碑不错"),
+    (re.compile(r"\b(noodle|ramen|pho|pasta|dumpling|dim sum|hot pot)\b", re.I), "面食、点心或热锅类菜品评价不错"),
+    (re.compile(r"\b(lunch special|happy hour|brunch|breakfast)\b", re.I), "午餐套餐、早午餐或 happy hour 反馈不错"),
+    (re.compile(r"\b(cocktail|beer|wine|drink|bar)\b", re.I), "酒水或吧台体验不错"),
+    (re.compile(r"\b(dessert|pastry|bakery|ice cream|cake)\b", re.I), "甜品、烘焙或冰淇淋反馈不错"),
+    (re.compile(r"\b(food|dish|menu|delicious|tasty|flavor|fresh|portion)\b", re.I), "菜品味道评价较好"),
+    (re.compile(r"\b(attentive|friendly|helpful|kind|great service|server|staff)\b", re.I), "服务细致或态度友好"),
+    (re.compile(r"\b(atmosphere|vibe|ambiance|decor|interior|space|cozy|quiet)\b", re.I), "环境氛围较好"),
+    (re.compile(r"\b(location|view|walk|convenient|near|market)\b", re.I), "位置和周边便利性较好"),
+    (re.compile(r"\b(exhibit|museum|gallery|historic|history|art|collection)\b", re.I), "展览、历史或艺术内容评价不错"),
 )
 
 
@@ -574,6 +600,9 @@ def _local_comment_summary_groups(
 
             goal = _natural_goal(event.goal if event else group.event_goal)
             sentiment = "整体反馈偏正面" if len(high_reviews) >= max(len(low_reviews), 1) else "评论反馈有分化"
+            positive_hint = _strip_sentence_suffix(pros[0]) if pros else "有可参考的用户反馈"
+            risk_hint = _strip_sentence_suffix(risks[0]) if risks else "暂时没有明显集中风险"
+            risk_clause = risk_hint if risks else "暂时没有明显集中风险"
             summaries.append(
                 POICommentSummary(
                     business_id=bundle.business_id,
@@ -581,7 +610,7 @@ def _local_comment_summary_groups(
                     city=bundle.city,
                     summary=(
                         f"已读取 {loaded_reviews} 条评论和 {loaded_tips} 条短评。"
-                        f"作为{goal}候选点，{sentiment}，可结合下方风险再决定是否选择。"
+                        f"作为{goal}候选点，{sentiment}；主要亮点是{positive_hint}，{risk_clause}。"
                     ),
                     keywords=["评论已读取", "本地摘要"],
                     pros=pros[:3],
@@ -611,6 +640,52 @@ def _matched_local_labels(texts: list[str], patterns: tuple[tuple[re.Pattern[str
             if pattern.search(text) and label not in labels:
                 labels.append(label)
     return labels
+
+
+DISPLAY_TEXT_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    ("寿司、刺身或 omakase 被正面提到", "寿司、刺身或 omakase 口碑不错"),
+    ("面食、点心或热锅类菜品被评论提到", "面食、点心或热锅类菜品评价不错"),
+    ("甜品、烘焙或冰淇淋被正面提到", "甜品、烘焙或冰淇淋反馈不错"),
+    ("服务细致或态度友好被评论提到", "服务细致或态度友好"),
+    ("环境氛围或空间体验有正面反馈", "环境氛围较好"),
+    ("位置、景观或周边便利性被提到", "位置和周边便利性较好"),
+    ("展览、历史或艺术内容被正面提到", "展览、历史或艺术内容评价不错"),
+    ("评论提到可能需要排队或等待", "可能需要排队或等待"),
+    ("部分评论提到服务速度或服务体验不稳定", "服务速度或服务体验可能不稳定"),
+    ("部分评论认为价格或性价比需要留意", "价格或性价比需要留意"),
+    ("需要留意营业时间需要出发前再确认", "需要出发前确认营业时间"),
+    ("需要留意价格或性价比需要留意", "价格或性价比需要留意"),
+    ("需要留意可能需要排队或等待", "可能需要排队或等待"),
+    ("需要留意停车可能不太方便", "停车可能不太方便"),
+    ("需要留意环境可能偏吵", "环境可能偏吵"),
+)
+
+
+def _normalize_display_text(text: str) -> str:
+    cleaned = text.strip()
+    for old, new in DISPLAY_TEXT_REPLACEMENTS:
+        cleaned = cleaned.replace(old, new)
+    return cleaned
+
+
+def _strip_sentence_suffix(text: str) -> str:
+    return _normalize_display_text(text).rstrip("。；;")
+
+
+def _clean_sentence_parts(items: list[str], *, limit: int) -> list[str]:
+    parts: list[str] = []
+    for item in items:
+        cleaned = _strip_sentence_suffix(item)
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+        if len(parts) >= limit:
+            break
+    return parts
+
+
+def _join_sentence_parts(items: list[str], *, limit: int) -> str:
+    parts = _clean_sentence_parts(items, limit=limit)
+    return "；".join(parts)
 
 
 def _truncate_comment_text(text: str, *, max_chars: int = 180) -> str:
@@ -658,6 +733,11 @@ def _summary_is_display_chinese(summary: dict[str, Any]) -> bool:
     return bool(meaningful) and any(_has_cjk(text) for text in meaningful)
 
 
+def _summary_is_local_fallback(summary: dict[str, Any]) -> bool:
+    keywords = summary.get("keywords") or []
+    return any(str(keyword) == "本地摘要" for keyword in keywords)
+
+
 def _resolve_comment_files(poi_groups: list[Any]) -> tuple[Any, Any] | None:
     all_pois = [poi for group in poi_groups for poi in group.pois]
     if not all_pois:
@@ -693,7 +773,11 @@ def _build_comment_summary_groups(
     if not selected_poi_groups:
         return [], "no_comment_pois_selected"
 
-    cached_groups = _load_cached_comment_summaries(selected_poi_groups)
+    api_key, base_url, model = _comment_llm_config(payload, env_settings)
+    cached_groups = _load_cached_comment_summaries(
+        selected_poi_groups,
+        allow_local_fallback=not (api_key and model),
+    )
     if _summary_coverage(cached_groups, selected_poi_groups):
         return cached_groups, "cached"
 
@@ -736,7 +820,6 @@ def _build_comment_summary_groups(
     except Exception as error:
         return cached_groups, f"comment_load_failed:{type(error).__name__}"
 
-    api_key, base_url, model = _llm_config(payload, env_settings)
     if not api_key or not model:
         fallback_groups = _local_comment_summary_groups(intent=intent, comment_groups=comment_groups)
         if fallback_groups:
@@ -794,13 +877,13 @@ def _build_comment_summary_groups(
 
 
 def _review_summary_lines(raw: dict[str, Any], poi_type: str, event_goal: str | None) -> list[str]:
-    summary = raw.get("comment_summary")
+    summary = _normalize_display_text(str(raw.get("comment_summary"))) if raw.get("comment_summary") else None
     pros = [text for text in raw.get("comment_pros") or [] if text]
     categories = [_natural_category(category) for category in (raw.get("categories") or [])[:2]]
     if summary:
         lines = [summary]
         if pros:
-            lines.append("评论里比较突出的优点：" + "；".join(pros[:2]) + "。")
+            lines.append("亮点：" + _join_sentence_parts(pros, limit=2) + "。")
         return lines[:3]
     context = f"适合作为{_natural_goal(event_goal)}安排"
     if categories:
@@ -812,10 +895,11 @@ def _review_summary_lines(raw: dict[str, Any], poi_type: str, event_goal: str | 
 def _risk_note_lines(raw: dict[str, Any]) -> list[str]:
     risks = [text for text in raw.get("comment_notable_risks") or [] if text]
     cons = [text for text in raw.get("comment_cons") or [] if text]
-    notes = risks[:2]
+    notes = _clean_sentence_parts(risks, limit=2)
     for con in cons:
-        if con not in notes:
-            notes.append(con)
+        cleaned = _strip_sentence_suffix(con)
+        if cleaned and cleaned not in notes:
+            notes.append(cleaned)
         if len(notes) >= 3:
             break
     if notes:
@@ -827,12 +911,12 @@ def _risk_note_lines(raw: dict[str, Any]) -> list[str]:
 
 def _recommend_reason(raw: dict[str, Any], event_name: str, event_goal: str | None) -> str:
     pros = [text for text in raw.get("comment_pros") or [] if text]
-    summary = raw.get("comment_summary")
-    event_label = _event_display_name(event_name, event_goal)
+    summary = _normalize_display_text(str(raw.get("comment_summary"))) if raw.get("comment_summary") else None
     if pros:
-        return f"推荐它作为{event_label}，因为评论里多次提到：{'；'.join(pros[:3])}。"
+        return _join_sentence_parts(pros, limit=3) + "。"
     if summary:
-        return f"推荐它作为{event_label}，因为评论摘要显示：{summary}"
+        return _strip_sentence_suffix(summary) + "。"
+    event_label = _event_display_name(event_name, event_goal)
     return f"推荐它作为{event_label}，因为它和这一段需求匹配，评分 {raw['stars']:.1f}，累计 {raw['review_count']} 条评价。"
 
 

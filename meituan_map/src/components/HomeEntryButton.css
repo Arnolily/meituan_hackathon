@@ -1,0 +1,41 @@
+.home-entry-button {
+  position: fixed;
+  top: 18px;
+  right: 72px;
+  z-index: 120;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #1d1d1f;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  box-shadow:
+    0 10px 26px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.home-entry-button:hover {
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 14px 30px rgba(0, 113, 227, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.84);
+  transform: translateY(-1px);
+}
+
+@media (max-width: 768px) {
+  .home-entry-button {
+    top: 12px;
+    right: 66px;
+  }
+}

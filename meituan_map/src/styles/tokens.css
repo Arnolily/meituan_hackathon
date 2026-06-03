@@ -1,0 +1,52 @@
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f7;
+  --bg-dark: #000000;
+  --text-primary: #1d1d1f;
+  --text-secondary: #86868b;
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --accent-soft: rgba(0, 113, 227, 0.12);
+  --surface: #ffffff;
+  --surface-elevated: rgba(255, 255, 255, 0.72);
+  --glass-bg: rgba(255, 255, 255, 0.68);
+  --glass-bg-strong: rgba(255, 255, 255, 0.82);
+  --glass-bg-subtle: rgba(255, 255, 255, 0.45);
+  --glass-border: rgba(255, 255, 255, 0.72);
+  --glass-border-outer: rgba(0, 0, 0, 0.06);
+  --glass-blur: 24px;
+  --glass-saturate: 180%;
+  --border: rgba(0, 0, 0, 0.08);
+  --chat-panel-width: 340px;
+  --chat-panel-height: 260px;
+  --shadow-card:
+    0 4px 16px rgba(0, 0, 0, 0.04),
+    0 12px 32px rgba(0, 0, 0, 0.08),
+    0 24px 64px rgba(0, 0, 0, 0.04);
+  --shadow-panel-hover:
+    0 8px 24px rgba(0, 0, 0, 0.06),
+    0 16px 40px rgba(0, 0, 0, 0.1);
+  --nav-height: 56px;
+  --account-sidebar-width: 300px;
+  --account-sidebar-glass: rgba(255, 255, 255, 0.38);
+  --account-sidebar-glass-strong: rgba(255, 255, 255, 0.55);
+  --fab-size: 52px;
+  --fab-edge-inset: 20px;
+  --font-stack: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC",
+    "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --radius-lg: 20px;
+  --radius-md: 16px;
+  --radius-sm: 12px;
+  --radius-pill: 100px;
+  --ease-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 220ms;
+  --focus-ring: 0 0 0 3px rgba(0, 113, 227, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-normal: 0ms;
+  }
+}

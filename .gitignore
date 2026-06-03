@@ -5,4 +5,5 @@
 *pycache*
 *tests*
 *cache*
-*data*
+*.env.local*
+/data/

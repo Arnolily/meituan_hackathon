@@ -15,7 +15,7 @@
 - Google Maps JavaScript API Key：用于加载 Google 地图底图、定位预览和路线地图展示。
 - Google Maps Map ID：可选。如果 Google Cloud 项目需要自定义地图样式或向量地图能力，可以配置 `VITE_GOOGLE_MAP_ID`。
 - MiMo API Key：用于“分析需求”和确认弹窗中的自然语言修改。未配置或请求失败时，项目会使用本地兜底规则继续演示，但大模型解析能力不可用。
-- OpenRouteService API Key：可选。后端设置 `OPENROUTESERVICE_API_KEY` 或 `ORS_API_KEY` 后会使用真实步行路线；未配置时后端使用本地直线距离估算。
+- OpenRouteService API Key：可选。后端设置 `OPENROUTESERVICE_API_KEY` 或 `ORS_API_KEY` 后会使用真实步行道路路线；未配置或请求失败时只保留距离估算，不会绘制直线，地图端会尝试通过 Google Directions 补全真实道路轨迹。
 
 ## 环境变量
 
@@ -34,7 +34,7 @@ VITE_GOOGLE_MAP_ID=your_google_maps_map_id_here
 VITE_MIMO_API_KEY=your_mimo_api_key_here
 MIMO_API_KEY=your_mimo_api_key_here
 VITE_MIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
-VITE_MIMO_MODEL=mimo-v2.5-pro
+VITE_MIMO_MODEL=mimo-v2-flash
 VITE_MIMO_PROXY_PATH=/api/mimo
 
 VITE_DEEPSEEK_API_KEY=your_deepseek_api_key_here
@@ -161,7 +161,7 @@ python tools/test_mimo_chat.py
 也可以显式传入配置：
 
 ```bash
-python tools/test_mimo_chat.py --api-key your_mimo_api_key_here --base-url https://token-plan-cn.xiaomimimo.com/v1 --model mimo-v2.5-pro
+python tools/test_mimo_chat.py --api-key your_mimo_api_key_here --base-url https://token-plan-cn.xiaomimimo.com/v1 --model mimo-v2-flash
 ```
 
 脚本默认会读取 `.env.local` 中的 `MIMO_API_KEY` 或 `VITE_MIMO_API_KEY`。

@@ -11,6 +11,9 @@ import "./styles/mvp.css";
 
 export default function App() {
   const currentView = useAppStore((s) => s.currentView);
+  const travelIntent = useAppStore((s) => s.travelIntent);
+  const backendClarification = useAppStore((s) => s.backendClarification);
+  const hasBlockingDialog = currentView === "map" && Boolean(backendClarification || (travelIntent && !travelIntent.confirmed));
 
   if (currentView === "execution") {
     return (
@@ -29,9 +32,9 @@ export default function App() {
       <>
         <GoogleMapsPreloader />
         <MapContainer />
-        <HomeEntryButton />
-        <AccountEntryButton floating />
-        <AccountSidebar />
+        {!hasBlockingDialog ? <HomeEntryButton /> : null}
+        {!hasBlockingDialog ? <AccountEntryButton floating /> : null}
+        {!hasBlockingDialog ? <AccountSidebar /> : null}
         <MapRoutePage />
       </>
     );

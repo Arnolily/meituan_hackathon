@@ -8,14 +8,15 @@
   --accent-hover: #0077ed;
   --accent-soft: rgba(0, 113, 227, 0.12);
   --surface: #ffffff;
-  --surface-elevated: rgba(255, 255, 255, 0.72);
-  --glass-bg: rgba(255, 255, 255, 0.68);
-  --glass-bg-strong: rgba(255, 255, 255, 0.82);
-  --glass-bg-subtle: rgba(255, 255, 255, 0.45);
-  --glass-border: rgba(255, 255, 255, 0.72);
-  --glass-border-outer: rgba(0, 0, 0, 0.06);
+  --surface-soft: rgba(255, 255, 255, 0.74);
+  --surface-elevated: rgba(255, 255, 255, 0.88);
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-bg-strong: rgba(255, 255, 255, 0.84);
+  --glass-bg-subtle: rgba(255, 255, 255, 0.56);
+  --glass-border: rgba(255, 255, 255, 0.78);
+  --glass-border-outer: rgba(255, 255, 255, 0.62);
   --glass-blur: 24px;
-  --glass-saturate: 180%;
+  --glass-saturate: 165%;
   --border: rgba(0, 0, 0, 0.08);
   --chat-panel-width: 340px;
   --chat-panel-height: 260px;
@@ -26,10 +27,10 @@
   --shadow-panel-hover:
     0 8px 24px rgba(0, 0, 0, 0.06),
     0 16px 40px rgba(0, 0, 0, 0.1);
-  --nav-height: 56px;
-  --account-sidebar-width: 300px;
-  --account-sidebar-glass: rgba(255, 255, 255, 0.38);
-  --account-sidebar-glass-strong: rgba(255, 255, 255, 0.55);
+  --nav-height: 48px;
+  --account-sidebar-width: 320px;
+  --account-sidebar-glass: rgba(255, 255, 255, 0.72);
+  --account-sidebar-glass-strong: rgba(255, 255, 255, 0.86);
   --fab-size: 52px;
   --fab-edge-inset: 20px;
   --font-stack: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC",
@@ -38,6 +39,8 @@
   --radius-md: 16px;
   --radius-sm: 12px;
   --radius-pill: 100px;
+  --layout-gutter: 24px;
+  --layout-gutter-mobile: 12px;
   --ease-out: cubic-bezier(0.4, 0, 0.2, 1);
   --duration-fast: 150ms;
   --duration-normal: 220ms;

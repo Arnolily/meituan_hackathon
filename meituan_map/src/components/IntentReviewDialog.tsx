@@ -1,16 +1,10 @@
 import { useEffect, useState } from "react";
-import {
-  getAvailableModelChoices,
-  getSelectedCommentModelChoiceId,
-  getSelectedModelChoiceId,
-  setSelectedCommentModelChoiceId,
-  setSelectedModelChoiceId,
-  type ModelChoiceId,
-} from "../services/mimo";
+import { getSelectedModelChoiceId } from "../services/mimo";
 import { useAppStore } from "../store/appStore";
 import type { Pace, TravelIntent } from "../types";
 import { describeRoutePreferences } from "../types/routePreferences";
 import { parsePlannerIntent, type BackendIntentEvent, type BackendIntentSummary } from "../services/plannerBackend";
+import { optionLabel, questionLabel } from "../utils/clarificationLabels";
 
 function paceLabel(value: Pace) {
   if (value === "compact") return "紧凑";
@@ -79,11 +73,10 @@ function eventTitle(event: BackendIntentEvent, index: number) {
 }
 
 function eventDescription(event: BackendIntentEvent) {
-  const parts = [
-    ...(event.categories ?? []).slice(0, 2).map(categoryLabel),
-    budgetLabel(event.budget_level),
-    ...(event.soft_preferences ?? []).slice(0, 1),
-  ].filter(Boolean);
+  const categories = (event.categories ?? []).slice(0, 2).map(categoryLabel);
+  const preferences = (event.soft_preferences ?? []).filter((item) => !categories.includes(categoryLabel(item))).slice(0, 1);
+  const parts = [...categories, ...preferences];
+  if (!parts.length && event.budget_level) parts.push(budgetLabel(event.budget_level));
   return parts.join("，") || "偏好待确认";
 }
 
@@ -124,13 +117,20 @@ export function IntentReviewDialog() {
   const clearAgentNotices = useAppStore((s) => s.clearAgentNotices);
   const setBackendClarification = useAppStore((s) => s.setBackendClarification);
   const setBackendIntent = useAppStore((s) => s.setBackendIntent);
+  const backendClarification = useAppStore((s) => s.backendClarification);
+  const submitBackendClarification = useAppStore((s) => s.submitBackendClarification);
   const showToast = useAppStore((s) => s.showToast);
   const [editableText, setEditableText] = useState(travelIntent?.rawText ?? "");
   const [parsedIntent, setParsedIntent] = useState<BackendIntentSummary | null>(backendIntent);
   const [isReparsing, setIsReparsing] = useState(false);
-  const [modelChoice, setModelChoice] = useState<ModelChoiceId>(getSelectedModelChoiceId());
-  const [commentModelChoice, setCommentModelChoice] = useState<ModelChoiceId>(getSelectedCommentModelChoiceId());
-  const modelChoices = getAvailableModelChoices();
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>(() => {
+    const answers: Record<string, string> = {};
+    backendClarification?.questions.forEach((question) => {
+      answers[question.id] = question.options.includes("do_not_care") ? "do_not_care" : question.options[0] ?? "";
+    });
+    return answers;
+  });
 
   const resetRouteWorkspace = () => {
     setGenerationStage("idle");
@@ -150,15 +150,6 @@ export function IntentReviewDialog() {
 
   useEffect(() => {
     if (!travelIntent || travelIntent.confirmed) return;
-    setEditableText(travelIntent.rawText);
-  }, [travelIntent?.rawText, travelIntent, travelIntent?.confirmed]);
-
-  useEffect(() => {
-    setParsedIntent(backendIntent);
-  }, [backendIntent]);
-
-  useEffect(() => {
-    if (!travelIntent || travelIntent.confirmed) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         handleBack();
@@ -171,27 +162,18 @@ export function IntentReviewDialog() {
 
   if (!travelIntent || travelIntent.confirmed) return null;
 
-  const reparseText = async (text: string) => {
-    const nextIntent = { ...travelIntent, rawText: text, confirmed: false };
-    const clarification = await parsePlannerIntent(nextIntent, undefined, modelChoice);
-    setTravelIntent(nextIntent);
-    setBackendIntent(clarification.intent);
-    setParsedIntent(clarification.intent);
-    setBackendClarification(clarification.needsClarification ? clarification : null);
-    return { nextIntent, parsed: clarification.intent };
-  };
-
   const handleReparse = async () => {
     if (isReparsing) return;
     setIsReparsing(true);
-    setSelectedModelChoiceId(modelChoice);
-    setSelectedCommentModelChoiceId(commentModelChoice);
     try {
       const before = comparableIntent(travelIntent, parsedIntent);
-      const text = editableText.trim() || travelIntent.rawText;
-      const result = await reparseText(text);
-      const after = comparableIntent(result.nextIntent, result.parsed);
-      showToast(before === after ? "这次理解结果没有变化" : "已经重新整理计划");
+      const nextIntent = { ...travelIntent, rawText: editableText.trim() || travelIntent.rawText, confirmed: false };
+      const clarification = await parsePlannerIntent(nextIntent, undefined, getSelectedModelChoiceId());
+      setTravelIntent(nextIntent);
+      setBackendIntent(clarification.intent);
+      setParsedIntent(clarification.intent);
+      setBackendClarification(clarification.needsClarification ? clarification : null);
+      showToast(before === comparableIntent(nextIntent, clarification.intent) ? "这次理解结果没有变化" : "已经重新整理计划");
     } catch {
       showToast("当前理解方式暂时不可用，计划没有改变");
     } finally {
@@ -199,11 +181,19 @@ export function IntentReviewDialog() {
     }
   };
 
-  const handleConfirm = () => {
-    resetRouteWorkspace();
-    setSelectedModelChoiceId(modelChoice);
-    setSelectedCommentModelChoiceId(commentModelChoice);
-    confirmTravelIntent();
+  const handleConfirm = async () => {
+    if (isConfirming) return;
+    setIsConfirming(true);
+    try {
+      resetRouteWorkspace();
+      if (backendClarification) {
+        await submitBackendClarification(clarificationAnswers);
+      }
+      confirmTravelIntent();
+    } catch {
+      setIsConfirming(false);
+      showToast("暂时无法保存补充偏好，请重试");
+    }
   };
 
   return (
@@ -241,38 +231,35 @@ export function IntentReviewDialog() {
           <div><dt>长期偏好</dt><dd>{describeRoutePreferences(routePreferences)}</dd></div>
         </dl>
 
-        <div className="intent-review-model">
-          <label>
-            <span>理解行程模型</span>
-            <select value={modelChoice} onChange={(event) => setModelChoice(event.target.value as ModelChoiceId)}>
-              {modelChoices.map((choice) => (
-                <option value={choice.id} key={choice.id}>
-                  {choice.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>解析评论模型</span>
-            <select value={commentModelChoice} onChange={(event) => setCommentModelChoice(event.target.value as ModelChoiceId)}>
-              {modelChoices.map((choice) => (
-                <option value={choice.id} key={choice.id}>
-                  {choice.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="button" className="btn-secondary" onClick={() => void handleReparse()} disabled={isReparsing}>
-            {isReparsing ? "正在重新理解..." : "重新理解这句话"}
-          </button>
-        </div>
+        {backendClarification?.questions.length ? (
+          <div className="intent-review-clarifications" aria-label="补充偏好">
+            <span>补充偏好</span>
+            {backendClarification.questions.map((question) => (
+              <label key={question.id}>
+                <span>{questionLabel(question.question, question.field, question.event_index)}</span>
+                <select
+                  value={clarificationAnswers[question.id] ?? ""}
+                  onChange={(event) => setClarificationAnswers((current) => ({ ...current, [question.id]: event.target.value }))}
+                >
+                  {question.options.map((option) => (
+                    <option value={option} key={option}>{optionLabel(option)}</option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
+        ) : null}
+
+        <button type="button" className="intent-review-reparse" onClick={() => void handleReparse()} disabled={isReparsing}>
+          {isReparsing ? "正在重新理解..." : "重新理解这句话"}
+        </button>
 
         <div className="intent-review-actions">
           <button type="button" className="btn-secondary" onClick={handleBack}>
             返回首页修改
           </button>
-          <button type="button" className="btn-primary" onClick={handleConfirm}>
-            确认并生成路线
+          <button type="button" className="btn-primary" onClick={() => void handleConfirm()} disabled={isConfirming}>
+            {isConfirming ? "正在开始生成..." : "确认并生成路线"}
           </button>
         </div>
       </div>

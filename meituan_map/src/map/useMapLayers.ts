@@ -24,15 +24,49 @@ function markerHtml(poi: Poi, index: number | null, active: boolean, selected: b
   `;
 }
 
-function pathFromRoute(route: RoutePlan, pois: Poi[]) {
-  if (route.polyline.length >= 2) {
+function routePois(route: RoutePlan, pois: Poi[]) {
+  const poiMap = new Map(pois.map((poi) => [poi.id, poi]));
+  return route.poiIds.map((id) => poiMap.get(id)).filter((poi): poi is Poi => Boolean(poi));
+}
+
+async function roadPathFromRoute(route: RoutePlan, pois: Poi[], maps: AnyMap): Promise<[number, number][]> {
+  if (route.geometrySource === "openrouteservice" && route.polyline.length >= 2) {
     return route.polyline;
   }
-  const poiMap = new Map(pois.map((poi) => [poi.id, poi]));
-  return route.poiIds
-    .map((id) => poiMap.get(id))
-    .filter((poi): poi is Poi => Boolean(poi))
-    .map((poi) => [poi.lng, poi.lat] as [number, number]);
+
+  const stops = routePois(route, pois);
+  if (stops.length < 2 || typeof maps.DirectionsService !== "function") return [];
+
+  const origin = stops[0];
+  const destination = stops[stops.length - 1];
+  const waypoints = stops.slice(1, -1).map((poi) => ({
+    location: { lat: poi.lat, lng: poi.lng },
+    stopover: true,
+  }));
+
+  return new Promise((resolve) => {
+    const service = new maps.DirectionsService();
+    service.route(
+      {
+        origin: { lat: origin.lat, lng: origin.lng },
+        destination: { lat: destination.lat, lng: destination.lng },
+        waypoints,
+        optimizeWaypoints: false,
+        travelMode: maps.TravelMode.WALKING,
+      },
+      (result: AnyMap, status: string) => {
+        if (status !== "OK" || !result?.routes?.[0]?.overview_path) {
+          resolve([]);
+          return;
+        }
+        resolve(
+          result.routes[0].overview_path.map(
+            (point: AnyMap) => [point.lng(), point.lat()] as [number, number]
+          )
+        );
+      }
+    );
+  });
 }
 
 function createHtmlOverlay(
@@ -204,7 +238,10 @@ export function useMapLayers() {
     const activeRoute = routes.find((route) => route.id === activeRouteId);
     const activeIds = new Set(activeRoute?.poiIds ?? []);
     const shouldShowCandidates =
-      generationStage === "poi_filtering" || generationStage === "route_comparing" || generationStage === "route_ready";
+      generationStage === "poi_filtering" ||
+      generationStage === "route_comparing" ||
+      generationStage === "route_generating" ||
+      generationStage === "route_ready";
     const visiblePois = shouldShowCandidates ? pois : [];
 
     visiblePois.forEach((poi) => {
@@ -234,55 +271,72 @@ export function useMapLayers() {
     if (!map || !maps) return;
     linesRef.current.forEach((line) => line.setMap(null));
     linesRef.current = [];
-    if (generationStage !== "route_ready" && generationStage !== "route_comparing") return;
+    const shouldShowRoutes =
+      generationStage === "poi_filtering" ||
+      generationStage === "route_comparing" ||
+      generationStage === "route_generating" ||
+      generationStage === "route_ready";
+    if (!shouldShowRoutes) return;
 
     const bounds = new maps.LatLngBounds();
     let hasBounds = false;
 
-    routes.forEach((route) => {
-      const path = pathFromRoute(route, pois);
-      if (path.length < 2) return;
-      const active = route.id === activeRouteId;
-      const googlePath = path.map(toGoogleLatLng);
-      googlePath.forEach((point) => {
-        bounds.extend(point);
-        hasBounds = true;
+    const activeRoute = routes.find((route) => route.id === activeRouteId) ?? routes[0];
+    const visibleRoutes = generationStage === "route_comparing" ? routes : activeRoute ? [activeRoute] : routes.slice(0, 1);
+    let cancelled = false;
+
+    void Promise.all(
+      visibleRoutes.map(async (route) => ({
+        route,
+        path: await roadPathFromRoute(route, pois, maps),
+      }))
+    ).then((resolvedRoutes) => {
+      if (cancelled) return;
+      resolvedRoutes.forEach(({ route, path }) => {
+        if (path.length < 2) return;
+        const active = route.id === activeRouteId;
+        const googlePath = path.map(toGoogleLatLng);
+        googlePath.forEach((point) => {
+          bounds.extend(point);
+          hasBounds = true;
+        });
+
+        const dashed = generationStage === "route_comparing" || !active;
+        const line = new maps.Polyline({
+          path: googlePath,
+          geodesic: false,
+          strokeColor: active ? "#0071e3" : "#8e8e93",
+          strokeWeight: active ? 6 : 3,
+          strokeOpacity: dashed ? 0 : active ? 0.92 : 0.32,
+          zIndex: active ? 18 : 8,
+          icons: dashed
+            ? [
+                {
+                  icon: {
+                    path: "M 0,-1 0,1",
+                    strokeOpacity: active ? 0.82 : 0.34,
+                    strokeColor: active ? "#0071e3" : "#8e8e93",
+                    scale: active ? 4 : 3,
+                  },
+                  offset: "0",
+                  repeat: "16px",
+                },
+              ]
+            : undefined,
+        });
+        line.setMap(map);
+        linesRef.current.push(line);
       });
 
-      const dashed = generationStage === "route_comparing" || !active;
-      const line = new maps.Polyline({
-        path: googlePath,
-        geodesic: true,
-        strokeColor: active ? "#0071e3" : "#8e8e93",
-        strokeWeight: active ? 6 : 3,
-        strokeOpacity: dashed ? 0 : active ? 0.92 : 0.32,
-        zIndex: active ? 18 : 8,
-        icons: dashed
-          ? [
-              {
-                icon: {
-                  path: "M 0,-1 0,1",
-                  strokeOpacity: active ? 0.82 : 0.34,
-                  strokeColor: active ? "#0071e3" : "#8e8e93",
-                  scale: active ? 4 : 3,
-                },
-                offset: "0",
-                repeat: "16px",
-              },
-            ]
-          : undefined,
-      });
-      line.setMap(map);
-      linesRef.current.push(line);
+      if (generationStage === "route_ready" && hasBounds) {
+        window.setTimeout(() => {
+          if (!cancelled) map.fitBounds(bounds, { top: 90, right: 460, bottom: 120, left: 360 });
+        }, 80);
+      }
     });
 
-    if (generationStage === "route_ready" && hasBounds) {
-      window.setTimeout(() => {
-        map.fitBounds(bounds, { top: 90, right: 460, bottom: 120, left: 360 });
-      }, 80);
-    }
-
     return () => {
+      cancelled = true;
       linesRef.current.forEach((line) => line.setMap(null));
       linesRef.current = [];
     };

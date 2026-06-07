@@ -6,6 +6,12 @@ import { useAppStore } from "../store/appStore";
 import { useGeolocation } from "../hooks/useGeolocation";
 import type { Poi, RoutePlan } from "../types";
 
+interface MapViewportController {
+  panTo: (position: { lat: number; lng: number }) => void;
+  setZoom: (zoom: number) => void;
+  getZoom: () => number | undefined;
+}
+
 export function MapContainer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const setMapInstance = useAppStore((s) => s.setMapInstance);
@@ -18,6 +24,10 @@ export function MapContainer() {
   const pois = useAppStore((s) => s.pois);
   const routes = useAppStore((s) => s.routes);
   const activeRouteId = useAppStore((s) => s.activeRouteId);
+  const currentView = useAppStore((s) => s.currentView);
+  const executionRouteId = useAppStore((s) => s.executionRouteId);
+  const currentStepIndex = useAppStore((s) => s.currentStepIndex);
+  const mapInstance = useAppStore((s) => s.mapInstance) as MapViewportController | null;
   const shouldUseCurrentLocation = travelIntent?.startPointMode === "currentLocation";
   const { setLocationMarker } = useMapLayers();
   const [retryNonce, setRetryNonce] = useState(0);
@@ -27,6 +37,18 @@ export function MapContainer() {
   const activeLoadIdRef = useRef(0);
 
   useGeolocation(setLocationMarker);
+
+  useEffect(() => {
+    if (currentView !== "execution" || !mapInstance) return;
+    const executionRoute = routes.find((route) => route.id === executionRouteId);
+    const poiId = executionRoute?.poiIds[currentStepIndex];
+    const poi = pois.find((item) => item.id === poiId);
+    if (!poi) return;
+    window.setTimeout(() => {
+      mapInstance.panTo({ lat: poi.lat, lng: poi.lng });
+      mapInstance.setZoom(Math.max(mapInstance.getZoom() ?? 15, 16));
+    }, 120);
+  }, [currentStepIndex, currentView, executionRouteId, mapInstance, pois, routes]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -178,8 +200,6 @@ function CachedMapFallback({
   const visiblePois = activeRoute
     ? activeRoute.poiIds.map((id) => pois.find((poi) => poi.id === id)).filter((poi): poi is Poi => Boolean(poi))
     : pois.slice(0, 5);
-  const routePoints = visiblePois.map((poi) => projectPoi(poi));
-  const routePolyline = routePoints.map((point) => `${point.x},${point.y}`).join(" ");
 
   return (
     <div className="map-loading-preview" aria-live="polite">
@@ -189,11 +209,6 @@ function CachedMapFallback({
       <div className="map-loading-preview__district map-loading-preview__district--city" />
       <div className="map-loading-preview__district map-loading-preview__district--museum" />
       <div className="map-loading-preview__district map-loading-preview__district--riverwalk" />
-      {routePoints.length > 1 ? (
-        <svg className="map-loading-preview__route" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-          <polyline points={routePolyline} />
-        </svg>
-      ) : null}
       {visiblePois.length > 0 ? (
         visiblePois.map((poi, index) => {
           const point = projectPoi(poi);

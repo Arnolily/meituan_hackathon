@@ -10,7 +10,7 @@ const DESKTOP_MIN_WIDTH = 768;
 const PANEL_DESKTOP_WIDTH = 440;
 const PANEL_RIGHT_GUTTER = 24;
 const PANEL_MIN_GUTTER = 16;
-const PANEL_INITIAL_TOP = 88;
+const PANEL_INITIAL_TOP = 80;
 
 function getInitialPanelPosition() {
   if (typeof window === "undefined") {
@@ -54,6 +54,22 @@ export function RouteEditorPanel() {
   const [isDraggingPanel, setIsDraggingPanel] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
 
+  const openPoiDetail = (poiId: string) => {
+    setReplacePoi(null);
+    setSelectedPoi(poiId);
+  };
+
+  const openPoiReplacement = (poi: Poi) => {
+    setSelectedPoi(null);
+    setShareOpen(false);
+    setReplacePoi(poi);
+  };
+
+  const openShare = () => {
+    setReplacePoi(null);
+    setShareOpen(true);
+  };
+
   const activeRoute = routes.find((route) => route.id === activeRouteId) ?? routes[0];
   const activePois = activeRoute ? getPoisForRoute(activeRoute, pois) : [];
   const stopByPoi = new Map(activeRoute?.stops.map((stop) => [stop.poiId, stop]) ?? []);
@@ -72,11 +88,11 @@ export function RouteEditorPanel() {
       const rect = panel.getBoundingClientRect();
       const defaultLeft = Math.max(PANEL_MIN_GUTTER, window.innerWidth - rect.width - PANEL_RIGHT_GUTTER);
       const maxLeft = Math.max(PANEL_MIN_GUTTER, window.innerWidth - rect.width - PANEL_MIN_GUTTER);
-      const maxTop = Math.max(68, window.innerHeight - rect.height - 16);
+      const maxTop = Math.max(72, window.innerHeight - rect.height - 24);
 
       setPanelPosition((current) => ({
         left: hasDraggedPanel.current ? Math.min(Math.max(PANEL_MIN_GUTTER, current.left), maxLeft) : defaultLeft,
-        top: Math.min(Math.max(68, current.top), maxTop),
+        top: Math.min(Math.max(72, current.top), maxTop),
       }));
     };
 
@@ -124,13 +140,13 @@ export function RouteEditorPanel() {
 
     const rect = panelRef.current.getBoundingClientRect();
     const maxLeft = Math.max(16, window.innerWidth - rect.width - 16);
-    const maxTop = Math.max(68, window.innerHeight - rect.height - 16);
+    const maxTop = Math.max(72, window.innerHeight - rect.height - 24);
     const nextLeft = event.clientX - dragOffset.current.x;
     const nextTop = event.clientY - dragOffset.current.y;
 
     setPanelPosition({
       left: Math.min(Math.max(16, nextLeft), maxLeft),
-      top: Math.min(Math.max(68, nextTop), maxTop),
+      top: Math.min(Math.max(72, nextTop), maxTop),
     });
   };
 
@@ -317,10 +333,10 @@ export function RouteEditorPanel() {
                     aria-label={`${poi.name} 停留时间`}
                   />
                   <div className="poi-item__actions">
-                    <button type="button" className="btn-secondary" onClick={() => setSelectedPoi(poi.id)}>
+                    <button type="button" className="btn-secondary" onClick={() => openPoiDetail(poi.id)}>
                       详情
                     </button>
-                    <button type="button" className="btn-secondary" onClick={() => setReplacePoi(poi)}>
+                    <button type="button" className="btn-secondary" onClick={() => openPoiReplacement(poi)}>
                       替换
                     </button>
                     <button type="button" className="btn-secondary" onClick={() => removePoiFromRoute(activeRoute.id, poi.id)}>
@@ -350,7 +366,7 @@ export function RouteEditorPanel() {
             <button type="button" className="btn-secondary" onClick={() => saveRouteToHistory(activeRoute.id)}>
               保存路线
             </button>
-            <button type="button" className="btn-secondary" onClick={() => setShareOpen(true)}>
+            <button type="button" className="btn-secondary" onClick={openShare}>
               分享路线
             </button>
           </div>

@@ -2,6 +2,49 @@
 
 This repo contains a Python route-planning backend and a React/Vite frontend. The runtime depends on a local Yelp city-subset data package, which is not committed to GitHub.
 
+## Current Integrated Workspace
+
+The workspace was synchronized on **2026-06-06** with the requested upstream repository:
+
+```text
+https://github.com/Arnolily/meituan_hackathon.git
+commit: 3eaaa4ec63d7b42732bea3acd2cfe0286dc4c47a
+```
+
+Integration rules:
+
+- The frontend remains the upstream implementation under `meituan_map/`; no custom UI or behavior changes are applied.
+- The Python backend remains under `src/planner/`.
+- The separately supplied larger Yelp dataset is used from `data/interim/city_subsets/philadelphia_pa/`.
+- Real API keys are stored only in ignored `.env.local` files and must never be committed or copied into documentation.
+- The old root-level React frontend and its dependency directory were removed.
+- This root README and `.agents/log.md` contain local integration notes; they do not change frontend runtime behavior.
+
+Current local Yelp subset:
+
+| Dataset item | Count | File size |
+| --- | ---: | ---: |
+| Businesses | 14,575 | 12,648,583 bytes |
+| Reviews | 967,871 | 800,968,253 bytes |
+| Tips | 118,557 | 24,625,818 bytes |
+| Check-ins | 12,899 | 39,240,398 bytes |
+| Users | 285,674 | 580,103,365 bytes |
+
+Total local dataset size is approximately **1.46 GB**.
+
+Latest verification:
+
+```text
+Frontend production build: passed
+Python tests: 2 passed
+Backend health: http://127.0.0.1:8000/api/planner/health -> {"ok": true}
+Frontend: http://127.0.0.1:5173/ -> HTTP 200
+Frontend planner proxy health -> {"ok": true}
+Real large-data POI load -> passed
+```
+
+The upstream frontend currently reports three existing `react-hooks/set-state-in-effect` ESLint errors. They are intentionally left unchanged so the frontend remains identical to the requested upstream implementation.
+
 ## Repository Layout
 
 ```text
@@ -111,13 +154,29 @@ test -f data/interim/city_subsets/philadelphia_pa/yelp_academic_dataset_tip.json
 
 ### 5. Configure Environment Variables
 
-Create `meituan_map/.env.local`:
+Create the backend environment file at repo root and the frontend environment file under `meituan_map/`:
 
 ```bash
+touch .env.local
 cp meituan_map/.env.example meituan_map/.env.local
 ```
 
-Edit it and set the keys needed by the frontend and backend:
+Root `.env.local`:
+
+```text
+MIMO_API_KEY=...
+MIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
+MIMO_MODEL=mimo-v2-flash
+
+DEEPSEEK_API_KEY=...
+DEEPSEEK_BASE_URL=https://api.siliconflow.cn/v1
+DEEPSEEK_MODEL=deepseek-ai/DeepSeek-V4-Flash
+
+OPENROUTESERVICE_API_KEY=...
+ORS_TIMEOUT_SEC=20
+```
+
+`meituan_map/.env.local`:
 
 ```text
 VITE_GOOGLE_MAPS_API_KEY=...
@@ -125,7 +184,7 @@ VITE_GOOGLE_MAPS_API_KEY=...
 VITE_MIMO_API_KEY=...
 MIMO_API_KEY=...
 VITE_MIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
-VITE_MIMO_MODEL=mimo-v2.5-pro
+VITE_MIMO_MODEL=mimo-v2-flash
 VITE_MIMO_PROXY_PATH=/api/mimo
 
 VITE_DEEPSEEK_API_KEY=...
@@ -137,13 +196,6 @@ VITE_DEEPSEEK_PROXY_PATH=/api/deepseek
 VITE_PLANNER_API_BASE_URL=http://127.0.0.1:8000
 VITE_PLANNER_API_PATH=/api/planner/routes
 VITE_PLANNER_CLARIFICATION_API_PATH=/api/planner/clarifications
-```
-
-Optional backend-only route provider:
-
-```text
-OPENROUTESERVICE_API_KEY=...
-ORS_TIMEOUT_SEC=20
 ```
 
 Without OpenRouteService, the backend falls back to approximate straight-line route legs.
@@ -175,13 +227,13 @@ Open terminal 2:
 
 ```bash
 cd meituan_map
-npm run dev -- --host 127.0.0.1 --port 5174
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:5174/
+http://127.0.0.1:5173/
 ```
 
 ## Alternative Environment: Native Windows PowerShell
@@ -253,9 +305,10 @@ All four commands should return `True`.
 
 ### 5. Configure Environment Variables
 
-Copy:
+Create root `.env.local` with the backend variables and copy the frontend environment template:
 
 ```powershell
+New-Item .\.env.local -ItemType File -Force
 Copy-Item .\meituan_map\.env.example .\meituan_map\.env.local
 ```
 
@@ -283,13 +336,13 @@ Open PowerShell terminal 2:
 
 ```powershell
 cd meituan_map
-npm run dev -- --host 127.0.0.1 --port 5174
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:5174/
+http://127.0.0.1:5173/
 ```
 
 ## API Endpoints

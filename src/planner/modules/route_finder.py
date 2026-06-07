@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Protocol
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Protocol
 
 from planner.modules.ors_client import OpenRouteServiceClientError
 from planner.schemas import (
@@ -36,6 +37,7 @@ def find_route_candidates(
     max_candidates: int = 20,
     dwell_minutes_per_event: float = 45.0,
     require_return: bool = False,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[RouteCandidate]:
     grouped_options = [_top_pois_for_event(group, max_pois_per_event) for group in aggregated_groups]
     grouped_options = [options for options in grouped_options if options]
@@ -49,7 +51,7 @@ def find_route_candidates(
         require_return=require_return,
         limit=max_candidates,
     )
-    for poi_tuple in route_options:
+    def build_candidate(poi_tuple: tuple[EventOption, ...]) -> RouteCandidate:
         stops = _build_stops(
             poi_tuple,
             anchor=anchor,
@@ -57,7 +59,15 @@ def find_route_candidates(
             require_return=require_return,
         )
         legs = _build_legs(stops, direction_client=direction_client, mode=mode)
-        candidates.append(_score_candidate(stops=stops, legs=legs, mode=mode))
+        return _score_candidate(stops=stops, legs=legs, mode=mode)
+
+    total = len(route_options)
+    with ThreadPoolExecutor(max_workers=min(3, total)) as executor:
+        futures = [executor.submit(build_candidate, poi_tuple) for poi_tuple in route_options]
+        for completed, future in enumerate(as_completed(futures), start=1):
+            candidates.append(future.result())
+            if progress_callback is not None:
+                progress_callback(completed, total)
 
     candidates.sort(key=lambda candidate: (-candidate.feasible, -candidate.score, candidate.total_travel_seconds))
     return candidates

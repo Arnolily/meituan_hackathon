@@ -12,7 +12,7 @@ import type {
 
 const DEFAULT_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1";
 const DEFAULT_PROXY_PATH = "/api/mimo";
-const DEFAULT_MODEL = "mimo-v2.5-pro";
+const DEFAULT_MODEL = "mimo-v2-flash";
 const DEFAULT_DEEPSEEK_BASE_URL = "https://api.siliconflow.cn/v1";
 const DEFAULT_DEEPSEEK_PROXY_PATH = "/api/deepseek";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-ai/DeepSeek-V4-Flash";

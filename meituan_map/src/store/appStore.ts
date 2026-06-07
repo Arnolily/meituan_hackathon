@@ -21,14 +21,17 @@ import { getPoisForRoute, recalculateRoute, recalculateRoutes, walkingDistanceKm
 import { createRouteHistoryItem, loadRouteHistory, prependRouteHistory, saveRouteHistory } from "../utils/routeHistory";
 import { personalizeRoutes } from "../utils/routePersonalization";
 import {
-  generateRoutesWithBackend,
   isPlannerClarificationError,
   type BackendIntentSummary,
+  type PlannerBackendResult,
   type PlannerClarification,
+  type PlannerStreamEvent,
+  streamRoutesWithBackend,
 } from "../services/plannerBackend";
 
 export type AccountSection = "login" | "profile" | "preferences" | "history";
 export type AccountView = "menu" | "detail";
+export type GenerationPanelMode = "open" | "docked" | "closed";
 
 export interface AccountUser {
   name: string;
@@ -67,6 +70,11 @@ interface AppState {
   travelIntent: TravelIntent | null;
   generationStage: GenerationStage;
   generationProgressText: string;
+  generationEvents: PlannerStreamEvent[];
+  generationProgress: number;
+  generationPanelMode: GenerationPanelMode;
+  isBackgroundEnriching: boolean;
+  activeRequestId: string | null;
   pois: Poi[];
   routes: RoutePlan[];
   activeRouteId: string | null;
@@ -99,8 +107,9 @@ interface AppState {
   setTravelIntent: (intent: TravelIntent) => void;
   updateTravelIntent: (patch: Partial<TravelIntent>) => void;
   confirmTravelIntent: () => void;
-  startDemoIntent: () => void;
   setGenerationStage: (stage: GenerationStage) => void;
+  setGenerationPanelMode: (mode: GenerationPanelMode) => void;
+  cancelGeneration: () => void;
   runDemoGeneration: () => Promise<void>;
   submitBackendClarification: (answers: Record<string, string>) => Promise<void>;
   clearBackendClarification: () => void;
@@ -168,7 +177,7 @@ const GENERATION_TEXT: Record<GenerationStage, string> = {
   route_ready: "路线已生成",
 };
 
-const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+let activeGenerationController: AbortController | null = null;
 const clonePois = () => MOCK_POIS.map((poi) => ({ ...poi, tags: [...poi.tags], alternatives: [...poi.alternatives] }));
 const cloneRoutePlan = (route: RoutePlan): RoutePlan => ({
   ...route,
@@ -187,6 +196,19 @@ const cloneRoutes = (
 
 function targetHoursFrom(intent: TravelIntent | null) {
   return intent?.durationHours ?? 4;
+}
+
+function isPlannerBackendResult(data: PlannerStreamEvent["data"]): data is PlannerBackendResult {
+  return Boolean(data && "routes" in data && "pois" in data);
+}
+
+function stageFromStreamEvent(event: PlannerStreamEvent, current: GenerationStage): GenerationStage {
+  if (event.type === "partial_result") return "route_comparing";
+  if (event.type === "result") return "route_generating";
+  if (event.type !== "stage") return current;
+  if (event.stage === "fast_planning") return "poi_filtering";
+  if (event.stage === "enriching") return "route_comparing";
+  return current;
 }
 
 function refreshRoutes(
@@ -284,6 +306,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   travelIntent: null,
   generationStage: "idle",
   generationProgressText: GENERATION_TEXT.idle,
+  generationEvents: [],
+  generationProgress: 0,
+  generationPanelMode: "closed",
+  isBackgroundEnriching: false,
+  activeRequestId: null,
   pois: [],
   routes: [],
   activeRouteId: null,
@@ -318,57 +345,142 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ travelIntent: { ...(s.travelIntent ?? DEMO_INTENT), ...patch } })),
   confirmTravelIntent: () =>
     set((s) => (s.travelIntent ? { travelIntent: { ...s.travelIntent, confirmed: true } } : s)),
-  startDemoIntent: () => set({ travelIntent: { ...DEMO_INTENT }, generationStage: "idle", generationProgressText: GENERATION_TEXT.idle }),
   setGenerationStage: (stage) => set({ generationStage: stage, generationProgressText: GENERATION_TEXT[stage] }),
+  setGenerationPanelMode: (mode) => set({ generationPanelMode: mode }),
+  cancelGeneration: () => {
+    activeGenerationController?.abort();
+    activeGenerationController = null;
+    set({
+      generationStage: "idle",
+      generationProgressText: "已停止生成",
+      generationPanelMode: get().generationEvents.length ? "docked" : "closed",
+      isBackgroundEnriching: false,
+      activeRequestId: null,
+    });
+  },
   runDemoGeneration: async () => {
-    set({ pois: [], routes: [], activeRouteId: null, selectedPoiId: null, detailPoi: null, visiblePoiIds: [] });
+    activeGenerationController?.abort();
+    activeGenerationController = new AbortController();
+    const controller = activeGenerationController;
+    set({
+      pois: [],
+      routes: [],
+      activeRouteId: null,
+      selectedPoiId: null,
+      detailPoi: null,
+      visiblePoiIds: [],
+      generationEvents: [],
+      generationProgress: 0,
+      generationPanelMode: "open",
+      isBackgroundEnriching: false,
+      activeRequestId: null,
+    });
 
     const state = get();
     const travelIntent = state.travelIntent;
     if (!travelIntent) return;
+    const backendContext = state.backendClarificationContext ?? (state.backendIntent ? { answers: {}, intent: state.backendIntent } : undefined);
 
     try {
       get().setGenerationStage("intent_parsing");
-      await delay(180);
-      get().setGenerationStage("poi_filtering");
       const anchor =
         state.userMapCenter && travelIntent.startPointMode === "currentLocation"
           ? { lng: state.userMapCenter[0], lat: state.userMapCenter[1], name: "当前位置" }
           : undefined;
-      const backendContext = state.backendClarificationContext ?? (state.backendIntent ? { answers: {}, intent: state.backendIntent } : undefined);
-      const backendResult = await generateRoutesWithBackend(travelIntent, anchor, backendContext);
-      set({ pois: backendResult.pois, visiblePoiIds: backendResult.pois.map((poi) => poi.id) });
-      get().setGenerationStage("route_comparing");
-      await delay(180);
-      get().setGenerationStage("route_generating");
-      const routes = personalizeRoutes(
-        backendResult.routes,
-        backendResult.pois,
-        state.routePreferences,
-        travelIntent
+      await streamRoutesWithBackend(
+        travelIntent,
+        anchor,
+        backendContext,
+        (event) => {
+          if (controller.signal.aborted) return;
+          set((current) => ({
+            generationEvents: [...current.generationEvents, event].slice(-120),
+            generationProgress: event.progress,
+            generationProgressText: event.message,
+            generationStage: stageFromStreamEvent(event, current.generationStage),
+            activeRequestId: event.requestId,
+            isBackgroundEnriching:
+              event.type === "stage" && event.stage === "enriching"
+                ? true
+                : event.type === "complete"
+                  ? false
+                  : current.isBackgroundEnriching,
+          }));
+
+          if (event.type === "clarification" && event.data && "questions" in event.data) {
+            set({
+              backendClarification: event.data,
+              backendClarificationContext: {
+                answers: { ...(backendContext?.answers ?? {}) },
+                intent: event.data.intent,
+              },
+              backendIntent: event.data.intent,
+              generationStage: "idle",
+              isBackgroundEnriching: false,
+            });
+            return;
+          }
+
+          if ((event.type === "partial_result" || event.type === "result") && isPlannerBackendResult(event.data)) {
+            const latest = get();
+            const routes = personalizeRoutes(event.data.routes, event.data.pois, latest.routePreferences, travelIntent);
+            const recommendedRoute = routes[0];
+            const activeRouteId = routes.some((route) => route.id === latest.activeRouteId)
+              ? latest.activeRouteId
+              : recommendedRoute?.id ?? null;
+            const adoptedRouteId = routes.some((route) => route.id === latest.adoptedRouteId)
+              ? latest.adoptedRouteId
+              : recommendedRoute?.id ?? null;
+            set({
+              pois: event.data.pois,
+              visiblePoiIds: event.data.pois.map((poi) => poi.id),
+              routes,
+              activeRouteId,
+              adoptedRouteId,
+              generationStage: event.type === "partial_result" ? "route_comparing" : "route_generating",
+              generationPanelMode: event.type === "partial_result" ? "docked" : latest.generationPanelMode,
+              showTimeline: true,
+              backendClarification: null,
+              backendClarificationContext: null,
+              backendIntent: event.data.intent ?? latest.backendIntent,
+              agentNotices: [...(event.data.agentNotices ?? []), ...latest.agentNotices].slice(0, 6),
+            });
+          }
+
+          if (event.type === "warning") {
+            set((current) => ({ agentNotices: [event.message, ...current.agentNotices].slice(0, 6) }));
+          }
+
+          if (event.type === "error") {
+            set((current) => ({
+              generationStage: "idle",
+              isBackgroundEnriching: false,
+              agentNotices: [event.message, ...current.agentNotices].slice(0, 6),
+            }));
+          }
+
+          if (event.type === "complete" && !get().backendClarification && get().generationStage !== "idle") {
+            set({
+              generationStage: "route_ready",
+              generationProgress: 100,
+              generationProgressText: event.message,
+              generationPanelMode: "docked",
+              isBackgroundEnriching: false,
+              activeRequestId: null,
+            });
+          }
+        },
+        controller.signal
       );
-      const recommendedRoute = routes[0];
-      set({
-        routes,
-        activeRouteId: recommendedRoute?.id ?? null,
-        adoptedRouteId: recommendedRoute?.id ?? null,
-        generationStage: "route_ready",
-        generationProgressText: GENERATION_TEXT.route_ready,
-        agentNotices: [
-          recommendedRoute
-            ? `已生成 ${routes.length} 条路线。当前推荐“${recommendedRoute.name}”，匹配度 ${recommendedRoute.preferenceScore ?? 80} 分。${recommendedRoute.preferenceReason ?? ""}`
-            : "已生成路线，可以查看方案细节。",
-          ...(backendResult.agentNotices ?? []),
-        ].slice(0, 4),
-        showTimeline: true,
-        backendClarification: null,
-        backendClarificationContext: null,
-        backendIntent: backendResult.intent ?? state.backendIntent,
-      });
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
       if (isPlannerClarificationError(error)) {
         set({
           backendClarification: error.clarification,
+          backendClarificationContext: {
+            answers: { ...(backendContext?.answers ?? {}) },
+            intent: error.clarification.intent,
+          },
           backendIntent: error.clarification.intent,
           generationStage: "idle",
           generationProgressText: "需要补充几个偏好",
@@ -387,6 +499,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         adoptedRouteId: recommendedRoute?.id ?? "route-experience",
         generationStage: "route_ready",
         generationProgressText: GENERATION_TEXT.route_ready,
+        generationPanelMode: "docked",
         agentNotices: [
           `暂时无法生成真实路线，已先展示演示路线。${error instanceof Error ? error.message : ""}`,
           recommendedRoute
@@ -396,6 +509,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         showTimeline: true,
         backendClarification: null,
       });
+    } finally {
+      if (activeGenerationController === controller) activeGenerationController = null;
     }
   },
   submitBackendClarification: async (answers) => {
@@ -407,7 +522,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!travelIntent.confirmed) {
       set({
         backendClarification: null,
-        backendClarificationContext: { answers, intent: clarification.intent },
+        backendClarificationContext: {
+          answers: { ...(state.backendClarificationContext?.answers ?? {}), ...answers },
+          intent: answeredIntent,
+        },
         backendIntent: answeredIntent,
         generationStage: "idle",
         generationProgressText: GENERATION_TEXT.idle,
@@ -416,43 +534,118 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
 
+    activeGenerationController?.abort();
+    activeGenerationController = new AbortController();
+    const controller = activeGenerationController;
+    const mergedAnswers = { ...(state.backendClarificationContext?.answers ?? {}), ...answers };
+    set({
+      backendClarification: null,
+      generationStage: "poi_filtering",
+      generationProgressText: "正在按补充偏好筛选地点",
+      generationEvents: [],
+      generationProgress: 0,
+      generationPanelMode: "open",
+      isBackgroundEnriching: false,
+    });
+
     try {
-      get().setGenerationStage("poi_filtering");
       const anchor =
         state.userMapCenter && travelIntent.startPointMode === "currentLocation"
           ? { lng: state.userMapCenter[0], lat: state.userMapCenter[1], name: "当前位置" }
           : undefined;
-      const backendResult = await generateRoutesWithBackend(travelIntent, anchor, {
-        answers: { ...(state.backendClarificationContext?.answers ?? {}), ...answers },
-        intent: clarification.intent,
-      });
-      set({ pois: backendResult.pois, visiblePoiIds: backendResult.pois.map((poi) => poi.id) });
-      get().setGenerationStage("route_comparing");
-      await delay(180);
-      get().setGenerationStage("route_generating");
-      const routes = personalizeRoutes(backendResult.routes, backendResult.pois, state.routePreferences, travelIntent);
-      const recommendedRoute = routes[0];
-      set({
-        routes,
-        activeRouteId: recommendedRoute?.id ?? null,
-        adoptedRouteId: recommendedRoute?.id ?? null,
-        generationStage: "route_ready",
-        generationProgressText: GENERATION_TEXT.route_ready,
-        backendClarification: null,
-        backendClarificationContext: null,
-        backendIntent: backendResult.intent ?? answeredIntent,
-        agentNotices: [
-          recommendedRoute
-            ? `已按补充偏好生成 ${routes.length} 条路线。当前推荐“${recommendedRoute.name}”。`
-            : "已按补充偏好生成路线。",
-          ...(backendResult.agentNotices ?? []),
-        ].slice(0, 4),
-        showTimeline: true,
-      });
+      await streamRoutesWithBackend(
+        travelIntent,
+        anchor,
+        {
+          answers: mergedAnswers,
+          intent: answeredIntent,
+        },
+        (event) => {
+          if (controller.signal.aborted) return;
+          set((current) => ({
+            generationEvents: [...current.generationEvents, event].slice(-120),
+            generationProgress: event.progress,
+            generationProgressText: event.message,
+            generationStage: stageFromStreamEvent(event, current.generationStage),
+            activeRequestId: event.requestId,
+            isBackgroundEnriching:
+              event.type === "stage" && event.stage === "enriching"
+                ? true
+                : event.type === "complete"
+                  ? false
+                  : current.isBackgroundEnriching,
+          }));
+
+          if ((event.type === "partial_result" || event.type === "result") && isPlannerBackendResult(event.data)) {
+            const latest = get();
+            const routes = personalizeRoutes(event.data.routes, event.data.pois, latest.routePreferences, travelIntent);
+            const recommendedRoute = routes[0];
+            set({
+              pois: event.data.pois,
+              visiblePoiIds: event.data.pois.map((poi) => poi.id),
+              routes,
+              activeRouteId: recommendedRoute?.id ?? null,
+              adoptedRouteId: recommendedRoute?.id ?? null,
+              generationStage: event.type === "partial_result" ? "route_comparing" : "route_generating",
+              generationPanelMode: event.type === "partial_result" ? "docked" : latest.generationPanelMode,
+              backendClarificationContext: null,
+              backendIntent: event.data.intent ?? answeredIntent,
+              agentNotices: [...(event.data.agentNotices ?? []), ...latest.agentNotices].slice(0, 6),
+              showTimeline: true,
+            });
+          }
+
+          if (event.type === "clarification" && event.data && "questions" in event.data) {
+            set({
+              backendClarification: event.data,
+              backendClarificationContext: {
+                answers: mergedAnswers,
+                intent: event.data.intent,
+              },
+              backendIntent: event.data.intent,
+              generationStage: "idle",
+              generationProgressText: "需要补充几个偏好",
+              isBackgroundEnriching: false,
+              activeRequestId: null,
+            });
+            return;
+          }
+
+          if (event.type === "warning") {
+            set((current) => ({ agentNotices: [event.message, ...current.agentNotices].slice(0, 6) }));
+          }
+
+          if (event.type === "error") {
+            set((current) => ({
+              generationStage: "idle",
+              isBackgroundEnriching: false,
+              activeRequestId: null,
+              agentNotices: [event.message, ...current.agentNotices].slice(0, 6),
+            }));
+          }
+
+          if (event.type === "complete" && !get().backendClarification && get().generationStage !== "idle") {
+            set({
+              generationStage: "route_ready",
+              generationProgress: 100,
+              generationProgressText: event.message,
+              generationPanelMode: "docked",
+              isBackgroundEnriching: false,
+              activeRequestId: null,
+            });
+          }
+        },
+        controller.signal
+      );
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
       if (isPlannerClarificationError(error)) {
         set({
           backendClarification: error.clarification,
+          backendClarificationContext: {
+            answers: mergedAnswers,
+            intent: error.clarification.intent,
+          },
           backendIntent: error.clarification.intent,
           generationStage: "idle",
           generationProgressText: "需要补充几个偏好",
@@ -468,6 +661,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           ...state.agentNotices,
         ].slice(0, 4),
       });
+    } finally {
+      if (activeGenerationController === controller) activeGenerationController = null;
     }
   },
   clearBackendClarification: () =>
@@ -484,7 +679,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   setActiveRoute: (id) => set({ activeRouteId: id, adoptedRouteId: id, showTimeline: !!id }),
   setSelectedPoi: (id) => {
     const poi = get().pois.find((item) => item.id === id) ?? null;
-    set({ selectedPoiId: id, detailPoi: poi });
+    set({
+      selectedPoiId: id,
+      detailPoi: poi,
+      shareOpen: id ? false : get().shareOpen,
+      accountSidebarOpen: id ? false : get().accountSidebarOpen,
+    });
   },
   reorderRoutePois: (routeId, sourceIndex, destinationIndex) =>
     set((s) => {
@@ -716,7 +916,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   endExecution: () => set({ currentView: "map", executionRouteId: null, currentStepIndex: 0, executionArrived: false }),
   setAdoptedRoute: (id) => set({ adoptedRouteId: id }),
   setVisiblePois: (ids) => set({ visiblePoiIds: ids }),
-  setDetailPoi: (p) => set({ detailPoi: p, selectedPoiId: p?.id ?? null }),
+  setDetailPoi: (p) => set({
+    detailPoi: p,
+    selectedPoiId: p?.id ?? null,
+    shareOpen: p ? false : get().shareOpen,
+    accountSidebarOpen: p ? false : get().accountSidebarOpen,
+  }),
   setSelectedPoiId: (id) => get().setSelectedPoi(id),
   setShowTimeline: (v) => set({ showTimeline: v }),
   showToast: (msg) => {
@@ -726,10 +931,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     }, 3000);
   },
   clearToast: () => set({ toast: null }),
-  setShareOpen: (v) => set({ shareOpen: v }),
+  setShareOpen: (v) => set({
+    shareOpen: v,
+    detailPoi: v ? null : get().detailPoi,
+    selectedPoiId: v ? null : get().selectedPoiId,
+    accountSidebarOpen: v ? false : get().accountSidebarOpen,
+  }),
   setAccountSidebarOpen: (v) => {
-    if (!v) set({ accountView: "menu" });
-    set({ accountSidebarOpen: v });
+    set({
+      accountSidebarOpen: v,
+      accountView: v ? get().accountView : "menu",
+      shareOpen: v ? false : get().shareOpen,
+      detailPoi: v ? null : get().detailPoi,
+      selectedPoiId: v ? null : get().selectedPoiId,
+    });
   },
   toggleAccountSidebar: () => get().setAccountSidebarOpen(!get().accountSidebarOpen),
   setAccountSection: (s) => set({ accountSection: s }),

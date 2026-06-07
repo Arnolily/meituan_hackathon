@@ -16,6 +16,7 @@ export function ExecutionPage() {
   const skipExecutionStep = useAppStore((s) => s.skipExecutionStep);
   const endExecution = useAppStore((s) => s.endExecution);
   const setShareOpen = useAppStore((s) => s.setShareOpen);
+  const setAccountSidebarOpen = useAppStore((s) => s.setAccountSidebarOpen);
   const [replaceOpen, setReplaceOpen] = useState(false);
   const route = routes.find((item) => item.id === executionRouteId) ?? routes[0];
   const routePois = route ? getPoisForRoute(route, pois) : [];
@@ -23,6 +24,17 @@ export function ExecutionPage() {
   const nextPoi = routePois[currentStepIndex + 1];
   const currentStop = route?.stops[currentStepIndex];
   const nextStop = route?.stops[currentStepIndex + 1];
+
+  const openReplacement = () => {
+    setShareOpen(false);
+    setAccountSidebarOpen(false);
+    setReplaceOpen(true);
+  };
+
+  const openShare = () => {
+    setReplaceOpen(false);
+    setShareOpen(true);
+  };
 
   return (
     <div className="execution-shell">
@@ -56,11 +68,11 @@ export function ExecutionPage() {
           ) : null}
 
           <div className="execution-actions">
-            <button type="button" className="btn-primary" onClick={markExecutionArrived}>我已到达</button>
-            <button type="button" className="btn-primary" onClick={advanceExecutionStep}>我已离开 / 下一站</button>
+            <button type="button" className={executionArrived ? "btn-secondary" : "btn-primary"} onClick={markExecutionArrived}>我已到达</button>
+            <button type="button" className={executionArrived ? "btn-primary" : "btn-secondary"} onClick={advanceExecutionStep}>我已离开 / 下一站</button>
             <button type="button" className="btn-secondary" onClick={skipExecutionStep}>跳过此站</button>
-            <button type="button" className="btn-secondary" disabled={!nextPoi} onClick={() => setReplaceOpen(true)}>替换下一站</button>
-            <button type="button" className="btn-secondary" onClick={() => setShareOpen(true)}>分享路线</button>
+            <button type="button" className="btn-secondary" disabled={!nextPoi} onClick={openReplacement}>替换下一站</button>
+            <button type="button" className="btn-secondary" onClick={openShare}>分享路线</button>
             <button type="button" className="btn-secondary" onClick={endExecution}>结束行程</button>
           </div>
         </section>

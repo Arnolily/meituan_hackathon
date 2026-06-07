@@ -95,7 +95,8 @@ export function recalculateRoute(route: RoutePlan, pois: Poi[], targetHours: num
     totalQueueTime,
     avgCost,
     status: calculateRouteStatus(totalDuration, targetHours),
-    polyline: routePois.map((poi) => [poi.lng, poi.lat]),
+    polyline: [],
+    geometrySource: "unavailable",
   };
 }
 

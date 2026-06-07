@@ -4,9 +4,7 @@ import { useAppStore } from "../store/appStore";
 import { ToastHost } from "../components/ToastHost";
 import {
   getAvailableModelChoices,
-  getSelectedCommentModelChoiceId,
   getSelectedModelChoiceId,
-  setSelectedCommentModelChoiceId,
   setSelectedModelChoiceId,
   type ModelChoiceId,
 } from "../services/mimo";
@@ -17,8 +15,6 @@ import { DEFAULT_LOCATION_LABEL, DEFAULT_MANUAL_START } from "../data/constants"
 
 const DEFAULT_TEXT = "我今天下午想在费城玩 4 小时，想吃饭、逛公园、喝咖啡，不想排队太久";
 const DEFAULT_POI_TYPES = ["餐饮", "公园", "文化"] as const;
-
-const DEMO_TEXT = "我今天下午想在费城玩 4 个小时，想吃点东西、逛公园、看点有意思的文化空间，不想排队太久，预算中等。";
 
 export function IntentPage() {
   const travelIntent = useAppStore((s) => s.travelIntent);
@@ -44,7 +40,6 @@ export function IntentPage() {
   const [pace, setPace] = useState<Pace>(travelIntent?.pace ?? "relaxed");
   const [preferences, setPreferences] = useState<string[]>(travelIntent?.preferences ?? ["少排队", "少走路"]);
   const [modelChoice, setModelChoice] = useState<ModelChoiceId>(getSelectedModelChoiceId());
-  const [commentModelChoice, setCommentModelChoice] = useState<ModelChoiceId>(getSelectedCommentModelChoiceId());
   const modelChoices = getAvailableModelChoices();
   const [approximateArea, setApproximateArea] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -103,7 +98,6 @@ export function IntentPage() {
     const draftIntent = buildIntent(false);
     setIsAnalyzing(true);
     setSelectedModelChoiceId(modelChoice);
-    setSelectedCommentModelChoiceId(commentModelChoice);
 
     try {
       const clarification = await parsePlannerIntent(draftIntent, undefined, modelChoice);
@@ -118,40 +112,6 @@ export function IntentPage() {
       setBackendIntent(null);
       setBackendClarification(null);
       showToast("当前理解方式暂时不可用，已先保留你填写的内容");
-    } finally {
-      setIsAnalyzing(false);
-      openMapReview();
-    }
-  };
-
-  const startDemo = async () => {
-    const demoIntent: TravelIntent = {
-      rawText: DEMO_TEXT,
-      startMode: "now",
-      startPointMode: "manual",
-      manualStartName: DEFAULT_MANUAL_START,
-      durationHours: 4,
-      budgetLevel: "medium",
-      pace: "relaxed",
-      preferences: ["少排队", "少走路", "体验轻松"],
-      poiTypes: [...DEFAULT_POI_TYPES],
-      confirmed: false,
-    };
-
-    setRawText(DEMO_TEXT);
-    syncFormFromIntent(demoIntent);
-    setIsAnalyzing(true);
-    setSelectedModelChoiceId(modelChoice);
-    setSelectedCommentModelChoiceId(commentModelChoice);
-    try {
-      const clarification = await parsePlannerIntent(demoIntent, undefined, modelChoice);
-      setTravelIntent(demoIntent);
-      setBackendIntent(clarification.intent);
-      setBackendClarification(clarification.needsClarification ? clarification : null);
-    } catch {
-      setTravelIntent(demoIntent);
-      setBackendIntent(null);
-      setBackendClarification(null);
     } finally {
       setIsAnalyzing(false);
       openMapReview();
@@ -204,23 +164,12 @@ export function IntentPage() {
             <textarea value={rawText} onChange={(event) => setRawText(event.target.value)} rows={5} />
           </label>
 
-          <p className="intent-helper">描述你想去的类型、时长和节奏，系统会把它组合成一条可演示的城市路线。</p>
+          <p className="intent-helper">描述地点类型、时长和节奏，系统会组合城市路线。</p>
 
-          <div className="intent-model-grid">
+          <div className="intent-model-grid intent-model-grid--single">
             <label className="intent-field intent-model-field">
               <span>理解行程模型</span>
               <select value={modelChoice} onChange={(event) => setModelChoice(event.target.value as ModelChoiceId)}>
-                {modelChoices.map((choice) => (
-                  <option value={choice.id} key={choice.id}>
-                    {choice.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="intent-field intent-model-field">
-              <span>解析评论模型</span>
-              <select value={commentModelChoice} onChange={(event) => setCommentModelChoice(event.target.value as ModelChoiceId)}>
                 {modelChoices.map((choice) => (
                   <option value={choice.id} key={choice.id}>
                     {choice.label}
@@ -291,11 +240,6 @@ export function IntentPage() {
             </button>
           </div>
 
-          <div className="intent-demo-entry">
-            <button className="intent-demo-entry__button" type="button" onClick={() => void startDemo()} disabled={isAnalyzing}>
-              启动演示流程
-            </button>
-          </div>
         </div>
       </section>
 

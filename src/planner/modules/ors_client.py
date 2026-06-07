@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.parse import urlencode
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -22,7 +21,7 @@ class OpenRouteServiceClientError(RuntimeError):
 
 
 class OpenRouteServiceDirectionClient:
-    def __init__(self, *, api_key: str, timeout: float = 20.0) -> None:
+    def __init__(self, *, api_key: str, timeout: float = 8.0) -> None:
         self.api_key = api_key
         self.timeout = timeout
 
@@ -32,31 +31,23 @@ class OpenRouteServiceDirectionClient:
         if len(stops) < 2:
             return []
 
-        profile = ORS_PROFILES[mode]
-        legs: list[RouteLeg] = []
-        for origin, destination in zip(stops, stops[1:]):
-            response = self._request(
-                profile=profile,
-                origin=origin,
-                destination=destination,
-            )
-            legs.extend(parse_ors_route(response, stops=[origin, destination], mode=mode))
-        return legs
+        response = self._request(profile=ORS_PROFILES[mode], stops=stops)
+        return parse_ors_route(response, stops=stops, mode=mode)
 
-    def _request(self, *, profile: str, origin: RouteStop, destination: RouteStop) -> dict[str, Any]:
-        query = urlencode(
-            {
-                "api_key": self.api_key,
-                "start": _format_coordinate(origin),
-                "end": _format_coordinate(destination),
-            }
-        )
+    def _request(self, *, profile: str, stops: list[RouteStop]) -> dict[str, Any]:
+        body = json.dumps(
+            {"coordinates": [[stop.longitude, stop.latitude] for stop in stops]},
+            separators=(",", ":"),
+        ).encode("utf-8")
         request = Request(
-            f"{ORS_BASE_URL}/{profile}?{query}",
+            f"{ORS_BASE_URL}/{profile}/geojson",
+            data=body,
             headers={
                 "Accept": "application/geo+json, application/json",
+                "Authorization": self.api_key,
+                "Content-Type": "application/json",
             },
-            method="GET",
+            method="POST",
         )
         try:
             with urlopen(request, timeout=self.timeout) as response:
@@ -124,10 +115,6 @@ def _parse_geojson_coordinates(coordinates: list[Any]) -> list[list[float]]:
             continue
         points.append([latitude, longitude])
     return points
-
-
-def _format_coordinate(stop: RouteStop) -> str:
-    return f"{stop.longitude:.8f},{stop.latitude:.8f}"
 
 
 def _to_float(value: Any) -> float | None:

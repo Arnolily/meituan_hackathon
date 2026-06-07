@@ -1,11 +1,29 @@
 import ast
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
 from planner.schemas import EventIntent, EventPOIGroup, GeoPoint, Intent, RawPOI, SpatialConstraint
 from planner.utils.geo import anchor_to_point, estimate_travel_minutes, haversine_distance_km
 from planner.vocab import GOAL_CATEGORY_HINTS, POI_TYPE_CATEGORY_HINTS
+
+
+@lru_cache(maxsize=8)
+def _load_business_records(path: str, modified_ns: int) -> tuple[dict[str, Any], ...]:
+    del modified_ns
+    records: list[dict[str, Any]] = []
+    with Path(path).open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return tuple(records)
+
+
+def _business_records(business_file: Path) -> tuple[dict[str, Any], ...]:
+    resolved = business_file.resolve()
+    return _load_business_records(str(resolved), resolved.stat().st_mtime_ns)
 
 
 def load_candidate_pois(
@@ -76,21 +94,15 @@ def _load_candidate_pois_for_event(
     spatial_constraint: Optional[SpatialConstraint] = None,
 ) -> list[RawPOI]:
     candidates: list[RawPOI] = []
-    with business_file.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
+    for poi in _business_pois(business_file):
+        scored_poi = _score_against_event(poi, intent, event)
+        if _failed_semantic_gate(scored_poi):
+            continue
+        if spatial_constraint is not None:
+            scored_poi = _annotate_spatial_fields(scored_poi, spatial_constraint)
+            if not _matches_spatial_constraint(scored_poi, spatial_constraint):
                 continue
-            record = json.loads(line)
-            poi = normalize_business_record(record)
-            scored_poi = _score_against_event(poi, intent, event)
-            if _failed_semantic_gate(scored_poi):
-                continue
-            if spatial_constraint is not None:
-                scored_poi = _annotate_spatial_fields(scored_poi, spatial_constraint)
-                if not _matches_spatial_constraint(scored_poi, spatial_constraint):
-                    continue
-            candidates.append(scored_poi)
+        candidates.append(scored_poi)
 
     candidates.sort(
         key=lambda poi: (
@@ -131,6 +143,16 @@ def normalize_business_record(record: dict[str, Any]) -> RawPOI:
         price_tier=price_tier,
         price_level=_price_level_from_tier(price_tier),
     )
+
+
+@lru_cache(maxsize=8)
+def _load_business_pois(path: str, modified_ns: int) -> tuple[RawPOI, ...]:
+    return tuple(normalize_business_record(record) for record in _load_business_records(path, modified_ns))
+
+
+def _business_pois(business_file: Path) -> tuple[RawPOI, ...]:
+    resolved = business_file.resolve()
+    return _load_business_pois(str(resolved), resolved.stat().st_mtime_ns)
 
 
 def _score_against_event(poi: RawPOI, intent: Intent, event: EventIntent) -> RawPOI:

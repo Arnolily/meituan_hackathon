@@ -310,6 +310,10 @@ a:hover {
 }
 
 .btn-primary {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: var(--accent);
   color: #fff;
   border-radius: var(--radius-sm);
@@ -324,6 +328,10 @@ a:hover {
 }
 
 .btn-secondary {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--accent);
   padding: 8px 12px;
   font-size: 14px;
@@ -331,6 +339,6 @@ a:hover {
   transition: background var(--duration-fast) var(--ease-out);
 }
 
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled) {
   background: var(--accent-soft);
 }

@@ -3,21 +3,21 @@
 .account-sidebar {
   --account-sidebar-gutter: 14px;
   position: fixed;
-  top: var(--nav-height);
-  right: 0;
-  bottom: 0;
+  top: calc(var(--nav-height) + var(--layout-gutter));
+  right: var(--layout-gutter);
+  bottom: max(var(--layout-gutter), env(safe-area-inset-bottom));
   width: var(--account-sidebar-width);
   z-index: 150;
   display: flex;
   flex-direction: column;
   pointer-events: auto;
-  background: var(--account-sidebar-glass);
+  background: var(--surface-soft);
   backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  border-left: 1px solid var(--glass-border);
-  box-shadow:
-    inset 1px 0 0 rgba(255, 255, 255, 0.55),
-    -10px 0 40px rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
   animation: account-sidebar-in var(--duration-normal) var(--ease-out);
 }
 
@@ -29,8 +29,8 @@
   gap: 8px;
   min-height: 56px;
   padding: 0 var(--account-sidebar-gutter);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.4);
-  background: rgba(255, 255, 255, 0.25);
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.82);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
@@ -861,7 +861,12 @@
 
 @media (max-width: 400px) {
   .account-sidebar {
-    width: min(100vw, var(--account-sidebar-width));
+    top: calc(var(--nav-height) + var(--layout-gutter-mobile));
+    right: max(var(--layout-gutter-mobile), env(safe-area-inset-right));
+    bottom: max(var(--layout-gutter-mobile), env(safe-area-inset-bottom));
+    left: max(var(--layout-gutter-mobile), env(safe-area-inset-left));
+    width: auto;
+    border-radius: 18px;
   }
 }
 
@@ -870,6 +875,45 @@
   .account-sidebar__detail {
     animation: none;
   }
+}
+
+/* Account views use the same glass material as every other page and form. */
+.account-sidebar,
+.account-sidebar__toolbar,
+.account-glass-card,
+.account-overview-card,
+.account-identity,
+.account-menu-list,
+.account-section,
+.account-profile-hero,
+.account-prefs-hero,
+.account-pref-block,
+.account-pref-summary,
+.account-fieldset,
+.account-history-item,
+.account-empty-state,
+.account-history-chat {
+  background: rgba(255, 255, 255, 0.62);
+  border-color: rgba(255, 255, 255, 0.76);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    0 12px 36px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(22px) saturate(165%);
+  -webkit-backdrop-filter: blur(22px) saturate(165%);
+}
+
+.account-field input,
+.account-pref-segments,
+.account-pref-segment,
+.account-radio,
+.account-toggle,
+.account-menu-list__row,
+.account-history-chat li {
+  background: rgba(255, 255, 255, 0.42);
+  border-color: rgba(255, 255, 255, 0.68);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(14px) saturate(150%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
 }
 
 @supports not (backdrop-filter: blur(1px)) {

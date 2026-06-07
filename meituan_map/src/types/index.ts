@@ -84,6 +84,7 @@ export interface RoutePlan {
   stops: RouteStop[];
   totalMinutes: number;
   polyline: [number, number][];
+  geometrySource?: "openrouteservice" | "google_directions" | "unavailable";
   preferenceScore?: number;
   preferenceTags?: string[];
   preferenceReason?: string;

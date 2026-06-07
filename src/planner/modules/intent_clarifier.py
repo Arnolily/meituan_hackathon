@@ -35,7 +35,7 @@ def build_clarification_plan(intent: Intent) -> ClarificationPlan:
                     id=f"event_{event_index}_budget_level",
                     event_index=event_index,
                     field="budget_level",
-                    question=f"Budget preference for {event_label}?",
+                    question=f"{event_label} 的预算范围",
                     options=BUDGET_OPTIONS,
                 )
             )
@@ -64,7 +64,7 @@ def build_poi_refinement_plan(intent: Intent, poi_groups: list[EventPOIGroup]) -
                     id=f"event_{group.event_index}_cuisine_category",
                     event_index=group.event_index,
                     field="cuisine_category",
-                    question=f"What kind of food for {event_label}?",
+                    question=f"{event_label} 想选择什么餐饮类型",
                     options=available_options + [DO_NOT_CARE],
                 )
             )

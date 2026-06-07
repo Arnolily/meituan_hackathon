@@ -8,7 +8,7 @@ from urllib import error, request
 
 
 DEFAULT_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
-DEFAULT_MODEL = "mimo-v2.5-pro"
+DEFAULT_MODEL = "mimo-v2-flash"
 DEFAULT_SYSTEM_PROMPT = "You are MiMo, a helpful AI assistant."
 
 

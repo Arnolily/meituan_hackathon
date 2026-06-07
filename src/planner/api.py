@@ -3,9 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
+import threading
+import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from planner.config import DEFAULT_CACHE_DIR, DEFAULT_INTERIM_DIR, PROJECT_ROOT, load_env_file
 from planner.io.comment_cache import load_cached_comments, save_cached_comments
@@ -48,6 +52,7 @@ PHILADELPHIA_ANCHOR = AnchorPoint(name="Philadelphia, PA, USA", latitude=39.9537
 MODE_SPEED_KPH: dict[RouteTravelMode, float] = {"walking": 4.8, "cycling": 15.0, "driving": 28.0}
 FRONTEND_POI_TYPES = ("餐饮", "娱乐", "商场", "公园", "文化")
 BROAD_CATEGORY_HINTS = {"Restaurants", "Food", "Museums", "Arts & Entertainment"}
+ENRICHMENT_DEADLINE_SECONDS = 8.0
 
 
 class ClarificationNeeded(Exception):
@@ -71,11 +76,10 @@ class ApproximateDirectionClient:
                     mode=mode,
                     distance_meters=round(distance_meters, 2),
                     duration_seconds=round(duration_seconds, 2),
-                    polyline=[[origin.latitude, origin.longitude], [destination.latitude, destination.longitude]],
                     provider="approximate",
                     provider_status="ok",
                     provider_info="Estimated from straight-line distance.",
-                    raw_path_count=1,
+                    raw_path_count=0,
                 )
             )
         return legs
@@ -116,6 +120,23 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _ndjson_response(handler: BaseHTTPRequestHandler, events: Iterator[dict[str, Any]]) -> None:
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache, no-transform")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.end_headers()
+    for event in events:
+        line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            handler.wfile.write(line)
+            handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            break
 
 
 def _budget_level(value: str | None) -> str:
@@ -229,7 +250,7 @@ def _extra_category_refinement_questions(
                 "id": f"event_{group.event_index}_category_refinement",
                 "event_index": group.event_index,
                 "field": "cuisine_category",
-                "question": f"What kind of POI for {event_label}?",
+                "question": f"{event_label} 想选择什么地点类型",
                 "options": available[:8] + [DO_NOT_CARE],
             }
         )
@@ -361,7 +382,7 @@ def _anchor_from_payload(payload: dict[str, Any]) -> AnchorPoint:
 def _direction_client(env_settings: dict[str, str]):
     ors_key = _env_value(env_settings, "OPENROUTESERVICE_API_KEY") or _env_value(env_settings, "ORS_API_KEY")
     if ors_key:
-        return OpenRouteServiceDirectionClient(api_key=ors_key, timeout=float(_env_value(env_settings, "ORS_TIMEOUT_SEC") or "20"))
+        return OpenRouteServiceDirectionClient(api_key=ors_key, timeout=float(_env_value(env_settings, "ORS_TIMEOUT_SEC") or "8"))
     return ApproximateDirectionClient()
 
 
@@ -1001,6 +1022,15 @@ def _frontend_routes(routes: list[Any], pois: list[dict[str, Any]], duration_hou
             status = "不可执行"
         strategy = "experience" if index == 1 else "efficiency" if index == 2 else "lowQueue"
         polyline = [point for leg in raw["legs"] for point in leg.get("polyline", [])]
+        geometry_source = (
+            "openrouteservice"
+            if polyline
+            and any(
+                leg.get("provider") == "openrouteservice" and leg.get("provider_status") == "ok"
+                for leg in raw["legs"]
+            )
+            else "unavailable"
+        )
         plans.append(
             {
                 "id": raw["route_id"],
@@ -1018,7 +1048,8 @@ def _frontend_routes(routes: list[Any], pois: list[dict[str, Any]], duration_hou
                 "tag": "实时路线" if raw.get("feasible") else "需复核",
                 "stops": timeline,
                 "totalMinutes": total_minutes,
-                "polyline": [[point[1], point[0]] for point in polyline] if polyline else [[poi_map[poi_id]["lng"], poi_map[poi_id]["lat"]] for poi_id in poi_ids],
+                "polyline": [[point[1], point[0]] for point in polyline],
+                "geometrySource": geometry_source,
                 "preferenceScore": max(50, min(99, round((raw.get("score") or 0) + 50))),
                 "preferenceTags": ["精选地点", "步行路线" if raw.get("mode") == "walking" else "出行路线"],
                 "preferenceReason": raw.get("explanation") or "",
@@ -1027,7 +1058,14 @@ def _frontend_routes(routes: list[Any], pois: list[dict[str, Any]], duration_hou
     return plans
 
 
-def generate_route_plan(payload: dict[str, Any]) -> dict[str, Any]:
+def _generate_route_plan(
+    payload: dict[str, Any],
+    *,
+    include_comment_summaries: bool = True,
+    use_live_directions: bool = True,
+    max_candidates: int = 12,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
     env_settings = _load_api_env()
     travel_intent = payload.get("travelIntent") or {}
     query = str(payload.get("query") or travel_intent.get("rawText") or "").strip()
@@ -1067,23 +1105,29 @@ def generate_route_plan(payload: dict[str, Any]) -> dict[str, Any]:
         answers=answers,
     )
 
-    summary_groups, comment_summary_source = _build_comment_summary_groups(
-        intent=intent,
-        poi_groups=poi_groups,
-        payload=payload,
-        env_settings=env_settings,
-    )
+    if include_comment_summaries:
+        summary_groups, comment_summary_source = _build_comment_summary_groups(
+            intent=intent,
+            poi_groups=poi_groups,
+            payload=payload,
+            env_settings=env_settings,
+        )
+    else:
+        summary_groups = _load_cached_comment_summaries(poi_groups)
+        comment_summary_source = "cached" if summary_groups else "disabled"
     aggregated_groups = aggregate_event_poi_groups(poi_groups, summary_groups)
+    direction_client = _direction_client(env_settings) if use_live_directions else ApproximateDirectionClient()
     routes = find_route_candidates(
         intent=intent,
         aggregated_groups=aggregated_groups,
-        direction_client=_direction_client(env_settings),
+        direction_client=direction_client,
         mode=mode,
         anchor=anchor,
         max_pois_per_event=4,
-        max_candidates=12,
+        max_candidates=max_candidates,
         dwell_minutes_per_event=45.0,
         require_return=bool(intent.return_location),
+        progress_callback=progress_callback,
     )
 
     save_cached_intent(intent, cache_dir=DEFAULT_CACHE_DIR, query=query, default_city="Philadelphia", model="api", base_url=None)
@@ -1097,7 +1141,7 @@ def generate_route_plan(payload: dict[str, Any]) -> dict[str, Any]:
         mode=mode,
         anchor=anchor,
         max_pois_per_event=4,
-        max_candidates=12,
+        max_candidates=max_candidates,
         dwell_minutes_per_event=45.0,
         require_return=bool(intent.return_location),
     )
@@ -1114,10 +1158,176 @@ def generate_route_plan(payload: dict[str, Any]) -> dict[str, Any]:
         "routes": frontend_routes,
         "agentNotices": [
             f"已经理解出 {len(intent.events)} 段行程，并挑选了 {len(frontend_pois)} 个候选地点。",
-            f"评论摘要：{_comment_source_label(comment_summary_source)}，已覆盖 {sum(len(group.summaries) for group in summary_groups)} 个地点的评论和短评。",
-            f"已生成 {len(frontend_routes)} 条路线；路段使用{'实时道路路线' if not isinstance(_direction_client(env_settings), ApproximateDirectionClient) else '距离估算'}。",
+            f"已读取缓存评论摘要，覆盖 {sum(len(group.summaries) for group in summary_groups)} 个候选地点。",
+            f"已生成 {len(frontend_routes)} 条路线；路段使用{'实时道路路线' if not isinstance(direction_client, ApproximateDirectionClient) else '距离估算'}。",
         ],
     }
+
+
+def generate_route_plan(
+    payload: dict[str, Any],
+    *,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    return _generate_route_plan(
+        payload,
+        include_comment_summaries=False,
+        max_candidates=3,
+        progress_callback=progress_callback,
+    )
+
+
+def generate_fast_route_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    return _generate_route_plan(
+        payload,
+        include_comment_summaries=False,
+        use_live_directions=False,
+        max_candidates=6,
+    )
+
+
+def _analysis_summary_messages(result: dict[str, Any], *, phase: str) -> list[str]:
+    routes = result.get("routes") or []
+    pois = result.get("pois") or []
+    messages: list[str] = []
+    if routes:
+        best = routes[0]
+        messages.append(
+            f"{phase}：优先保留“{best.get('name') or '推荐路线'}”，"
+            f"包含 {len(best.get('poiIds') or [])} 个地点，预计 {best.get('totalDuration') or best.get('totalMinutes') or 0} 分钟。"
+        )
+        reason = str(best.get("reason") or best.get("preferenceReason") or "").strip()
+        if reason:
+            messages.append(f"选择依据：{reason}")
+    for poi in pois[:4]:
+        messages.append(
+            f"候选地点：{poi.get('name') or '未命名地点'}，评分 {poi.get('rating') or 0}，"
+            f"预计排队 {poi.get('queueTime') or 0} 分钟。"
+        )
+    return messages
+
+
+def generate_route_plan_stream(payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    request_id = uuid.uuid4().hex
+    started_at = time.perf_counter()
+    sequence = 0
+
+    def event(event_type: str, message: str, *, progress: int, **extra: Any) -> dict[str, Any]:
+        nonlocal sequence
+        sequence += 1
+        return {
+            "type": event_type,
+            "requestId": request_id,
+            "sequence": sequence,
+            "message": message,
+            "progress": progress,
+            "elapsedMs": round((time.perf_counter() - started_at) * 1000),
+            **extra,
+        }
+
+    query = str(payload.get("query") or (payload.get("travelIntent") or {}).get("rawText") or "").strip()
+    if query:
+        yield event("analysis", f"已读取出行需求：{query[:96]}", progress=5, stage="request_analysis")
+    yield event("stage", "正在使用本地数据生成快速路线", progress=10, stage="fast_planning")
+    try:
+        fast_result = generate_fast_route_plan(payload)
+    except ClarificationNeeded as exc:
+        yield event(
+            "clarification",
+            "还需要补充部分偏好",
+            progress=100,
+            data={
+                "needsClarification": True,
+                "intent": exc.intent.model_dump(),
+                "questions": exc.questions,
+            },
+        )
+        yield event("complete", "等待补充偏好", progress=100, enhanced=False)
+        return
+    except Exception as exc:
+        yield event("error", "快速路线生成失败", progress=100, recoverable=False, error=str(exc))
+        yield event("complete", "路线生成失败", progress=100, enhanced=False)
+        return
+
+    yield event(
+        "partial_result",
+        f"已生成 {len(fast_result.get('routes') or [])} 条快速路线",
+        progress=55,
+        data=fast_result,
+    )
+    for message in _analysis_summary_messages(fast_result, phase="快速分析"):
+        yield event("analysis", message, progress=60, stage="fast_analysis")
+    yield event("stage", "正在精修道路路线与地点顺序", progress=65, stage="enriching")
+    enrichment_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+    def enrich() -> None:
+        try:
+            result = generate_route_plan(
+                payload,
+                progress_callback=lambda completed, total: enrichment_queue.put(
+                    ("progress", (completed, total))
+                ),
+            )
+            enrichment_queue.put(("result", result))
+        except Exception as exc:
+            enrichment_queue.put(("error", exc))
+
+    worker = threading.Thread(target=enrich, daemon=True)
+    worker.start()
+    deadline_at = time.perf_counter() + ENRICHMENT_DEADLINE_SECONDS
+    outcome: str | None = None
+    value: Any = None
+    completed_candidates = 0
+    total_candidates = 3
+    while outcome is None:
+        remaining = deadline_at - time.perf_counter()
+        if remaining <= 0:
+            yield event(
+                "warning",
+                "道路精修等待时间较长，已使用快速路线完成规划。",
+                progress=95,
+                recoverable=True,
+            )
+            yield event("complete", "快速路线已可用", progress=100, enhanced=False)
+            return
+        try:
+            item_type, item_value = enrichment_queue.get(timeout=min(0.75, remaining))
+        except queue.Empty:
+            elapsed_seconds = max(1, round(time.perf_counter() - started_at))
+            yield event(
+                "stage",
+                f"正在优化第 {min(completed_candidates + 1, total_candidates)}/{total_candidates} 条路线，已用时 {elapsed_seconds} 秒",
+                progress=65 + round((completed_candidates / total_candidates) * 27),
+                stage="enriching",
+            )
+            continue
+        if item_type == "progress":
+            completed_candidates, total_candidates = item_value
+            yield event(
+                "stage",
+                f"已完成 {completed_candidates}/{total_candidates} 条道路路线优化",
+                progress=65 + round((completed_candidates / max(total_candidates, 1)) * 27),
+                stage="enriching",
+            )
+            continue
+        outcome, value = item_type, item_value
+
+    if outcome == "result":
+        enriched_result = value
+        yield event("result", "道路路线与地点顺序已精修", progress=95, data=enriched_result)
+        for message in _analysis_summary_messages(enriched_result, phase="深度分析"):
+            yield event("analysis", message, progress=98, stage="final_analysis")
+        yield event("complete", "路线规划完成", progress=100, enhanced=True)
+    else:
+        exc = value
+        yield event(
+            "warning",
+            "后台深度分析暂时不可用，已保留快速路线",
+            progress=95,
+            recoverable=True,
+            error=str(exc),
+        )
+        yield event("complete", "快速路线已可用", progress=100, enhanced=False)
 
 
 def generate_clarification_plan(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1137,6 +1347,30 @@ def generate_clarification_plan(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def generate_clarification_plan_stream(payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    request_id = uuid.uuid4().hex
+    started_at = time.perf_counter()
+    yield {
+        "type": "stage",
+        "requestId": request_id,
+        "sequence": 1,
+        "message": "正在理解你的出行需求",
+        "progress": 20,
+        "elapsedMs": 0,
+        "stage": "intent_parsing",
+    }
+    result = generate_clarification_plan(payload)
+    yield {
+        "type": "result",
+        "requestId": request_id,
+        "sequence": 2,
+        "message": "出行需求已整理",
+        "progress": 100,
+        "elapsedMs": round((time.perf_counter() - started_at) * 1000),
+        "data": result,
+    }
+
+
 class PlannerRequestHandler(BaseHTTPRequestHandler):
     server_version = "MeituanPlannerAPI/0.1"
 
@@ -1145,17 +1379,28 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/api/planner/health":
-            _json_response(self, 200, {"ok": True})
+            _json_response(self, 200, {"ok": True, "ready": True})
             return
         _json_response(self, 404, {"error": "Not found"})
 
     def do_POST(self) -> None:
-        if self.path not in {"/api/planner/routes", "/api/planner/clarifications"}:
+        if self.path not in {
+            "/api/planner/routes",
+            "/api/planner/routes/stream",
+            "/api/planner/clarifications",
+            "/api/planner/clarifications/stream",
+        }:
             _json_response(self, 404, {"error": "Not found"})
             return
         try:
             length = int(self.headers.get("Content-Length") or "0")
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            if self.path == "/api/planner/routes/stream":
+                _ndjson_response(self, generate_route_plan_stream(payload))
+                return
+            if self.path == "/api/planner/clarifications/stream":
+                _ndjson_response(self, generate_clarification_plan_stream(payload))
+                return
             result = generate_clarification_plan(payload) if self.path == "/api/planner/clarifications" else generate_route_plan(payload)
         except ClarificationNeeded as exc:
             _json_response(

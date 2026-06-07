@@ -1,6 +1,24 @@
-from typing import Any, Dict, Optional
+import json
+from typing import Any, Dict, Iterable, Optional
 
 from openai import OpenAI
+
+
+def _collect_stream_content(chunks: Iterable[Any]) -> str:
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    for chunk in chunks:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        delta = getattr(choices[0], "delta", None)
+        content = getattr(delta, "content", None)
+        reasoning = getattr(delta, "reasoning_content", None)
+        if content:
+            content_parts.append(content)
+        if reasoning:
+            reasoning_parts.append(reasoning)
+    return "".join(content_parts) or "".join(reasoning_parts)
 
 
 class OpenAICompatibleClient:
@@ -16,14 +34,14 @@ class OpenAICompatibleClient:
         self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
     def generate_json(self, *, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Dict[str, Any]:
-        response = self.client.chat.completions.create(
+        chunks = self.client.chat.completions.create(
             model=self.model,
             temperature=temperature,
             response_format={"type": "json_object"},
+            stream=True,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        content = response.choices[0].message.content or "{}"
-        return __import__("json").loads(content)
+        return json.loads(_collect_stream_content(chunks) or "{}")

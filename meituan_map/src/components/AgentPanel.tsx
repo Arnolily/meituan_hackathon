@@ -17,10 +17,12 @@ const DESKTOP_MIN_WIDTH = 768;
 export function AgentPanel() {
   const stage = useAppStore((s) => s.generationStage);
   const notices = useAppStore((s) => s.agentNotices);
+  const generationEvents = useAppStore((s) => s.generationEvents);
+  const isBackgroundEnriching = useAppStore((s) => s.isBackgroundEnriching);
   const panelRef = useRef<HTMLElement | null>(null);
   const dragPointerId = useRef<number | null>(null);
   const dragOffset = useRef({ x: 0, y: 0 });
-  const [position, setPosition] = useState({ left: 24, top: 88 });
+  const [position, setPosition] = useState({ left: 24, top: 80 });
   const [isDragging, setIsDragging] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
 
@@ -33,11 +35,11 @@ export function AgentPanel() {
 
       const rect = panel.getBoundingClientRect();
       const maxLeft = Math.max(16, window.innerWidth - rect.width - 16);
-      const maxTop = Math.max(68, window.innerHeight - rect.height - 16);
+      const maxTop = Math.max(72, window.innerHeight - rect.height - 24);
 
       setPosition((current) => ({
         left: Math.min(Math.max(16, current.left), maxLeft),
-        top: Math.min(Math.max(68, current.top), maxTop),
+        top: Math.min(Math.max(72, current.top), maxTop),
       }));
     };
 
@@ -71,13 +73,13 @@ export function AgentPanel() {
 
     const rect = panelRef.current.getBoundingClientRect();
     const maxLeft = Math.max(16, window.innerWidth - rect.width - 16);
-    const maxTop = Math.max(68, window.innerHeight - rect.height - 16);
+    const maxTop = Math.max(72, window.innerHeight - rect.height - 24);
     const nextLeft = event.clientX - dragOffset.current.x;
     const nextTop = event.clientY - dragOffset.current.y;
 
     setPosition({
       left: Math.min(Math.max(16, nextLeft), maxLeft),
-      top: Math.min(Math.max(68, nextTop), maxTop),
+      top: Math.min(Math.max(72, nextTop), maxTop),
     });
   };
 
@@ -132,6 +134,25 @@ export function AgentPanel() {
         </button>
       </div>
       <p>{EXPLANATION[stage]}</p>
+      {generationEvents.length ? (
+        <div className="agent-stream">
+          <div className="agent-stream__header">
+            <strong>实时规划进度</strong>
+            <span className={isBackgroundEnriching ? "is-live" : ""}>
+              {isBackgroundEnriching ? "深度分析中" : "已更新"}
+            </span>
+          </div>
+          <ol>
+            {generationEvents.slice(-6).map((event) => (
+              <li key={`${event.requestId}-${event.sequence}`}>
+                <span className={`generation-event-dot is-${event.type}`} />
+                <span>{event.message}</span>
+                <small>{(event.elapsedMs / 1000).toFixed(1)}s</small>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
       {notices.length ? (
         <ul>
           {notices.map((notice, index) => (
